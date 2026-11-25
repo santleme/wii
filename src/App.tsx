@@ -3,11 +3,19 @@ import type { CalibrationProfile, SportActionEvent } from './cv/protocol';
 import { AutoCalibrator, type CalibrationPhase } from './cv/autoCalibrator';
 import { PoseClient, type PoseClientCallbacks } from './cv/poseClient';
 import { ActionPipeline } from './kinematics/actionPipeline';
+import { ContextClassifier, type ActivityKind } from './kinematics/contextClassifier';
 import { ProceduralAudio } from './games/audio';
 import { CameraPip } from './ui/CameraPip';
 import { GameCanvas, type GameEngineHandle, type Sport } from './ui/GameCanvas';
 import { drawPose } from './ui/PoseOverlay';
 import './styles.css';
+
+const ACTIVITY_LABEL: Record<ActivityKind, string> = {
+  idle: 'PARADO',
+  running: 'CORRIDA',
+  swinging: 'RAQUETE',
+  striking: 'LUTA',
+};
 
 export default function App() {
   const [sport, setSport] = useState<Sport>('track');
@@ -23,6 +31,7 @@ export default function App() {
   const streamRef = useRef<MediaStream | undefined>(undefined);
   const engineRef = useRef<GameEngineHandle | null>(null);
   const pipelineRef = useRef(new ActionPipeline());
+  const contextRef = useRef(new ContextClassifier());
   const calibratorRef = useRef(new AutoCalibrator());
   const sportRef = useRef(sport);
   sportRef.current = sport;
@@ -67,6 +76,7 @@ export default function App() {
     setTracking('SEM POSE');
     setCameraStatus('Câmera desligada');
     for (const event of pipelineRef.current.reset()) dispatchEvent(event);
+    contextRef.current.reset();
     recalibrate();
     drawPose(overlayRef.current, videoRef.current);
   }, [dispatchEvent, recalibrate]);
@@ -85,7 +95,6 @@ export default function App() {
         if (stale()) return;
         const result = pipelineRef.current.update(raw, profileRef.current);
         const current = result.snapshot;
-        setTracking(current.trackingState === 'tracked' ? 'TRACKING' : current.trackingState === 'lost' ? 'SEM POSE' : 'PROCURANDO');
         if (!profileRef.current) {
           const step = calibratorRef.current.update(current, sportRef.current === 'track');
           profileRef.current = step.profile;
@@ -97,6 +106,9 @@ export default function App() {
               : 'Calibração parcial · troca de raia e salto desativados · estenda as pernas e enquadre os tornozelos');
           }
         }
+        const decision = contextRef.current.update(current, profileRef.current);
+        const activity = decision.confidence01 > 0.4 ? ` · ${ACTIVITY_LABEL[decision.activity]}` : '';
+        setTracking(current.trackingState === 'tracked' ? `TRACKING${activity}` : current.trackingState === 'lost' ? 'SEM POSE' : 'PROCURANDO');
         drawPose(overlayRef.current, videoRef.current, current);
         for (const event of result.events) dispatchEvent(event);
       },
