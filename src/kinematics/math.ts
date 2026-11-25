@@ -16,6 +16,9 @@ export function landmarkConfidence(...points: Point3[]): number {
   return Math.min(...points.map((point) => {
     const visibility = point.visibility ?? point.presence ?? 0;
     const presence = point.presence ?? point.visibility ?? 0;
-    return Math.min(visibility, presence);
+    const confidence = Math.min(visibility, presence);
+    // NaN/Infinity não é confiança: sem o piso ele atravessava os gates de rejeição `< 0.55`
+    // (comparações com NaN são falsas) e entrava como válido nas medianas da calibração.
+    return Number.isFinite(confidence) ? confidence : 0;
   }));
 }

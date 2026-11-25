@@ -44,6 +44,13 @@ describe('landmark confidence', () => {
     expect(landmarkConfidence()).toBe(0);
     expect(landmarkConfidence({ x: 0, y: 0, z: 0, presence: 0.8 })).toBe(0.8);
   });
+
+  it('returns zero for non-finite confidence instead of propagating it', () => {
+    expect(landmarkConfidence({ x: 0, y: 0, z: 0, visibility: Number.NaN })).toBe(0);
+    // NaN masks a finite presence through Math.min; positive infinity masks it only when both are infinite.
+    expect(landmarkConfidence({ x: 0, y: 0, z: 0, visibility: Number.NaN, presence: 0.9 })).toBe(0);
+    expect(landmarkConfidence({ x: 0, y: 0, z: 0, visibility: Number.POSITIVE_INFINITY, presence: 0.9 })).toBe(0.9);
+  });
 });
 
 describe('cadence tracker', () => {
@@ -274,6 +281,15 @@ describe('world-space posture calibration', () => {
     const calibrator = new Calibrator();
     calibrator.start(0);
     for (let time = 0; time <= 3000; time += 100) calibrator.add(pose(time, { hiddenLandmarks: [25, 26] }));
+    expect(calibrator.finish()).toBeNull();
+  });
+
+  it('rejects calibration when confidence is NaN instead of counting those frames as valid', () => {
+    const calibrator = new Calibrator();
+    calibrator.start(0);
+    // `< 0.55` rejection gates never fire on NaN — without the non-finite floor these frames
+    // passed every gate and poisoned the medians (medianConfidence came out NaN, ratio 1).
+    for (let time = 0; time <= 3000; time += 100) calibrator.add(pose(time, { confidence: Number.NaN }));
     expect(calibrator.finish()).toBeNull();
   });
 
