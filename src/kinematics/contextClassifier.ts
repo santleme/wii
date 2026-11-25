@@ -14,7 +14,7 @@ export interface ContextScores {
 export interface ContextDecision {
   /** Current committed activity; stays stable until a challenger sustains a winning score. */
   activity: ActivityKind;
-  /** Best score times the best-vs-runner-up margin; 0 while there is too little evidence. */
+  /** Best score times twice the best-vs-runner-up margin, clamped; 0 while there is too little evidence. */
   confidence01: number;
   /** How long the committed activity has held, in ms. */
   stableForMs: number;
@@ -28,8 +28,6 @@ export interface ContextSignature {
   stepsPerMin: number;
   /** Regularity of step intervals, 0–1 (1 = metronome). */
   stepCoherence01: number;
-  /** Mid-hip vertical range over the window, in shoulder widths. */
-  hipOscAmp: number;
   /** Count of wrist bursts dominated by lateral motion (racket-like arcs). */
   lateralBursts: number;
   /** Count of wrist bursts dominated by depth motion (punch-like thrusts). */
@@ -38,12 +36,14 @@ export interface ContextSignature {
   peakWristSpeed: number;
   /** Fraction of frames with both fists above the shoulder line (guard stance). */
   guardRatio: number;
-  /** Mean gross motion level: wrist speeds + step rate + hip oscillation. */
+  /** Mean gross motion level: wrist speeds + step rate. */
   motionEnergy: number;
 }
 
 export interface ContextClassifierOptions {
-  /** Sliding window size; default keeps ~1.6 s at 30 fps. */
+  /** Sliding window length in wall-clock ms; evidence older than this is evicted. */
+  windowMs?: number;
+  /** Hard cap on buffered frames — memory bound only, not the window definition. */
   maxFrames?: number;
   /** Minimum window span before any non-idle decision is allowed. */
   minWindowMs?: number;
@@ -59,7 +59,9 @@ export interface ContextClassifierOptions {
   lostDecayMs?: number;
 }
 
-const DEFAULT_MAX_FRAMES = 48;
+const DEFAULT_WINDOW_MS = 1600;
+const DEFAULT_MAX_FRAMES = 96;
+const EVIDENCE_GAP_MS = 500;
 const DEFAULT_MIN_WINDOW_MS = 500;
 const DEFAULT_CONFIRM_EVALS = 3;
 const DEFAULT_DWELL_MS = 700;
@@ -120,6 +122,7 @@ export class ContextClassifier {
 
   constructor(options: ContextClassifierOptions = {}) {
     this.options = {
+      windowMs: options.windowMs ?? DEFAULT_WINDOW_MS,
       maxFrames: options.maxFrames ?? DEFAULT_MAX_FRAMES,
       minWindowMs: options.minWindowMs ?? DEFAULT_MIN_WINDOW_MS,
       confirmEvals: options.confirmEvals ?? DEFAULT_CONFIRM_EVALS,
@@ -132,24 +135,44 @@ export class ContextClassifier {
 
   update(snapshot: PoseSnapshot, calibration?: CalibrationProfile): ContextDecision {
     const now = snapshot.timestampMs;
+    if (this.lastSwitchAt === undefined) this.lastSwitchAt = now;
+    let evidenceAdded = false;
     if (snapshot.trackingState === 'tracked') {
       const features = this.extractor.extract(snapshot, calibration);
       if (features) {
+        const last = this.frames[this.frames.length - 1];
+        // A silent capture gap (stall, throttle) invalidates what came before it: pre- and
+        // post-gap motion must never blend into one signature, nor may dead time serve as dwell.
+        if (last !== undefined && now - last.timestampMs > EVIDENCE_GAP_MS) this.frames = [];
         this.frames.push(features);
+        while (this.frames.length > 0 && now - this.frames[0]!.timestampMs > this.options.windowMs) this.frames.shift();
         if (this.frames.length > this.options.maxFrames) this.frames.shift();
         this.lastTrackedAt = now;
+        evidenceAdded = true;
       }
     } else if (this.lastTrackedAt !== undefined && now - this.lastTrackedAt > this.options.lostDecayMs) {
-      // Untracked long enough that the window would mix pre- and post-loss motion.
+      // Tracking gone long enough that the player state is genuinely unknown: reset to the
+      // safe default through the control path rather than letting the frozen window re-score.
       this.frames = [];
+      this.challenger = undefined;
+      this.current = 'idle';
+      this.lastSwitchAt = now;
     }
 
     const signature = this.signature();
-    const scores = signature ? this.score(signature) : { idle: 1, running: 0, swinging: 0, striking: 0 };
+    const scores = signature ? this.score(signature) : { idle: 0, running: 0, swinging: 0, striking: 0 };
     const winner = this.pickWinner(scores);
     const margin = winner ? winner.score - this.runnerUpScore(scores, winner.kind) : 0;
 
-    if (winner && winner.kind !== this.current && winner.score >= this.options.enterScore && margin >= this.options.enterMargin) {
+    if (!evidenceAdded) {
+      // Frames without new evidence (lost/degraded/extraction failure) must not advance a
+      // challenge: re-evaluating the frozen window would count the same evidence many times.
+    } else if (
+      winner &&
+      winner.kind !== this.current &&
+      winner.score >= this.options.enterScore &&
+      margin >= this.options.enterMargin
+    ) {
       if (this.challenger?.kind === winner.kind) this.challenger.evals += 1;
       else this.challenger = { kind: winner.kind, evals: 1, sinceMs: now };
       if (this.challenger.evals >= this.options.confirmEvals && now - this.challenger.sinceMs >= this.options.dwellMs) {
@@ -211,12 +234,13 @@ export class ContextClassifier {
     if (spanMs < this.options.minWindowMs) return undefined;
     const windowSec = spanMs / 1000;
 
-    const kneeDeltas = frames.map((f) => f.kneeLiftLeft - f.kneeLiftRight);
+    // Frames without both knees measurable carry no step evidence at all — an occluded knee is
+    // NaN, never zero — so they are excluded rather than read as phantom leg motion.
+    const kneeFrames = frames.filter((f) => Number.isFinite(f.kneeLiftLeft) && Number.isFinite(f.kneeLiftRight));
+    const kneeDeltas = kneeFrames.map((f) => f.kneeLiftLeft - f.kneeLiftRight);
     const stepMean = mean(kneeDeltas);
     const stepAmplitude = range(kneeDeltas) / 2;
-    const { stepsPerMin, coherence } = this.stepRate(kneeDeltas, stepMean, stepAmplitude, windowSec, frames);
-
-    const hipOscAmp = range(frames.map((f) => f.midHipY));
+    const { stepsPerMin, coherence } = this.stepRate(kneeDeltas, stepMean, stepAmplitude, windowSec, kneeFrames);
 
     const bursts = this.wristBursts(frames);
     const guardRatio =
@@ -224,12 +248,11 @@ export class ContextClassifier {
       frames.length;
 
     const meanWristSpeed = mean(frames.map((f) => hypot3(f.wristVelocityLeft) + hypot3(f.wristVelocityRight)));
-    const motionEnergy = meanWristSpeed + stepsPerMin / 180 + hipOscAmp * 2;
+    const motionEnergy = meanWristSpeed + stepsPerMin / 180;
 
     return {
       stepsPerMin,
       stepCoherence01: coherence,
-      hipOscAmp,
       lateralBursts: bursts.lateral,
       forwardBursts: bursts.forward,
       peakWristSpeed: bursts.peakSpeed,
@@ -250,6 +273,7 @@ export class ContextClassifier {
     windowSec: number,
     frames: readonly CanonicalBodyFeatures[],
   ): { stepsPerMin: number; coherence: number } {
+    if (frames.length < 8) return { stepsPerMin: 0, coherence: 0 };
     if (amplitude < STEP_MIN_AMPLITUDE) return { stepsPerMin: 0, coherence: 0 };
     const band = Math.max(amplitude * 0.4, STEP_MIN_AMPLITUDE * 0.5);
     const crossings: number[] = [];
@@ -283,8 +307,11 @@ export class ContextClassifier {
     let peakSpeed = 0;
     const close = () => {
       if (burst.active && burst.peakSpeed >= BURST_MIN_PEAK) {
-        if (burst.peakLateralRatio >= DIRECTION_DOMINANCE) lateral += 1;
-        else if (burst.peakForwardRatio >= DIRECTION_DOMINANCE) forward += 1;
+        // Classify by the strictly dominant axis; diagonal bursts where neither direction
+        // clearly wins stay unclassified instead of being decided by check order.
+        const { peakLateralRatio: lat, peakForwardRatio: fwd } = burst;
+        if (lat >= DIRECTION_DOMINANCE && lat > fwd) lateral += 1;
+        else if (fwd >= DIRECTION_DOMINANCE && fwd > lat) forward += 1;
       }
       Object.assign(burst, open);
     };
@@ -311,12 +338,16 @@ export class ContextClassifier {
   }
 
   private score(s: ContextSignature): ContextScores {
+    // Running rests on the step signature alone: penalizing it for wrist bursts made the common
+    // case — running with natural arm pump — undetectable, while pure swinging/striking produce
+    // no coherent knee alternation and lose the margin competition on their own.
     const running =
       clamp((s.stepsPerMin - RUNNING_MIN_SPM) / (RUNNING_FULL_SPM - RUNNING_MIN_SPM)) *
-      (0.4 + 0.6 * s.stepCoherence01) *
-      clamp(1 - (s.lateralBursts + s.forwardBursts) / 4, 0.3, 1);
-    const swinging = clamp(s.lateralBursts / 2);
-    const striking = clamp(s.forwardBursts / 2) * (0.3 + 0.7 * s.guardRatio);
+      (0.4 + 0.6 * s.stepCoherence01);
+    // Dividing by three keeps a single isolated burst below enterScore: one burst is 0.33,
+    // so committing takes repeated events rather than one event lingering in the window.
+    const swinging = clamp(s.lateralBursts / 3);
+    const striking = clamp(s.forwardBursts / 3) * (0.3 + 0.7 * s.guardRatio);
     const idle = clamp(1 - s.motionEnergy / IDLE_ENERGY_FULL);
     return { idle, running, swinging, striking };
   }

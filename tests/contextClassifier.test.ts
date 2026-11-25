@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Point3, PoseSnapshot } from '../src/cv/protocol';
 import { BodyFeatureExtractor } from '../src/kinematics/bodyFeatures';
 import { ContextClassifier } from '../src/kinematics/contextClassifier';
-import { pose } from './fixtures/syntheticPose';
+import { pose, rotateWorldYaw } from './fixtures/syntheticPose';
 
 const FRAME_MS = 1000 / 30;
 const T0 = 10_000;
@@ -80,15 +80,18 @@ describe('BodyFeatureExtractor', () => {
     expect(features.landmarksLocal[16]!.y).toBeCloseTo(-0.25, 5);
     expect(features.landmarksLocal).toHaveLength(33);
     expect(features.kneeLiftLeft).toBeCloseTo(-1.125, 3);
-    expect(features.midHipY).toBeCloseTo(0, 5);
   });
 
-  it('reports zero velocity on the first frame and measures wrist speed afterwards', () => {
+  it('reports zero velocity on the first frame and converges to wrist speed in continuous motion', () => {
     const extractor = new BodyFeatureExtractor();
     const first = extractor.extract(pose(0))!;
     expect(first.landmarkVelocities[16]).toEqual({ x: 0, y: 0, z: 0 });
-    const moved = extractor.extract(pose(33.33, { wristLateral: 0.05 }))!;
-    // 0.05 m in ~33 ms ≈ 3.75 shoulder-widths/s, lateral (x) dominant.
+    expect(first.wristVelocityRight).toEqual({ x: 0, y: 0, z: 0 });
+    // Steady lateral sweep at 0.05 m/frame ≈ 3.75 shoulder-widths/s. Positions are OneEuro-filtered
+    // before differentiation, so a single step change reads low; the filter converges within a few
+    // frames of continuous motion (constant lag does not reduce the measured slope).
+    let moved = first;
+    for (let i = 1; i <= 8; i += 1) moved = extractor.extract(pose(i * 33.33, { wristLateral: 0.05 * i }))!;
     expect(Math.abs(moved.wristVelocityRight.x)).toBeGreaterThan(3);
     expect(Math.abs(moved.wristVelocityRight.z)).toBeLessThan(0.5);
   });
@@ -105,6 +108,15 @@ describe('BodyFeatureExtractor', () => {
     extractor.extract(pose(100));
     expect(() => extractor.extract(pose(100))).toThrow(RangeError);
     expect(() => extractor.extract(pose(50))).toThrow(RangeError);
+  });
+
+  it('reports occluded knee lift as NaN rather than as a phantom raised knee', () => {
+    const extractor = new BodyFeatureExtractor();
+    expect(extractor.extract(pose(0))!.kneeLiftLeft).toBeCloseTo(-1.125, 3);
+    const occluded = extractor.extract(pose(33.33, { hiddenLandmarks: [25] }))!;
+    // Zero would mean knee-at-hip-height — the extreme of the lift range — so validity uses NaN.
+    expect(occluded.kneeLiftLeft).toBeNaN();
+    expect(occluded.kneeLiftRight).toBeCloseTo(-1.125, 3);
   });
 
   it('zeroes hidden landmarks and their joints, and returns undefined when the core is hidden', () => {
@@ -179,5 +191,122 @@ describe('ContextClassifier', () => {
     classifier.reset();
     const decision = feed(classifier, idleFrames(48, 5000));
     expect(decision.activity).toBe('idle');
+  });
+});
+
+describe('ContextClassifier regression pinning', () => {
+  it('never leaves idle for a single isolated lateral burst followed by stillness', () => {
+    // One 300 ms arc at ~6 sw/s peak. The evidence lingers in the window longer than the dwell,
+    // so if one burst could reach enterScore the mere persistence of stale evidence would flip
+    // the context — the exact contract the FSM exists to prevent.
+    const frames = [
+      ...idleFrames(48),
+      ...Array.from({ length: 9 }, (_, i) =>
+        pose(T0 + (48 + i) * FRAME_MS, { wristLateral: 0.25 * Math.sin((Math.PI * (i + 1)) / 9) })),
+      ...idleFrames(60, 57 * FRAME_MS),
+    ];
+    const classifier = new ContextClassifier();
+    for (const snapshot of frames) {
+      expect(classifier.update(snapshot).activity).toBe('idle');
+    }
+  });
+
+  it('does not advance a pending challenge while tracking is lost', () => {
+    const classifier = new ContextClassifier();
+    // ~600 ms of swinging: enough to make swinging the winner but short of the 700 ms dwell.
+    const burstPhase = swingingFrames(20);
+    for (const snapshot of burstPhase) classifier.update(snapshot);
+    // 20 lost frames (~660 ms): with the window frozen, the dwell would complete here if
+    // lost frames still advanced the challenge.
+    const loss = lostFrames(20, 700);
+    for (const snapshot of loss) {
+      expect(classifier.update(snapshot).activity).toBe('idle');
+    }
+  });
+
+  it('does not fabricate running cadence from alternating knee occlusion', () => {
+    const classifier = new ContextClassifier();
+    const frames = Array.from({ length: 120 }, (_, i) =>
+      pose(T0 + i * FRAME_MS, { hiddenLandmarks: [i % 2 === 0 ? 25 : 26] }));
+    for (const snapshot of frames) {
+      const decision = classifier.update(snapshot);
+      expect(decision.activity).toBe('idle');
+      expect(decision.scores.running).toBe(0);
+    }
+  });
+
+  it('classifies a lateral swing the same when the player is yawed 90 degrees', () => {
+    const classifier = new ContextClassifier();
+    const frames = swingingFrames(90).map((snapshot) => rotateWorldYaw(snapshot, Math.PI / 2));
+    const decision = feed(classifier, frames);
+    expect(decision.activity).toBe('swinging');
+  });
+
+  it('detects running despite natural arm pump', () => {
+    // Arm pump swings the wrists forward/backward in z at cadence — fast enough to register as
+    // forward bursts — but running must rest on the knee-step signature, not on arm stillness.
+    const frames = Array.from({ length: 120 }, (_, i) => {
+      const phase = (i * FRAME_MS) / 500;
+      const liftLeft = Math.max(0, Math.sin(2 * Math.PI * phase));
+      const liftRight = Math.max(0, Math.sin(2 * Math.PI * phase + Math.PI));
+      const bounce = Math.abs(Math.sin(4 * Math.PI * phase)) * 0.04;
+      return setWorlds(pose(T0 + i * FRAME_MS), [
+        [25, { y: 0.45 - liftLeft * 0.2 }],
+        [26, { y: 0.45 - liftRight * 0.2 }],
+        [23, { y: -bounce }],
+        [24, { y: -bounce }],
+        [15, { z: 0.15 * Math.sin(2 * Math.PI * phase + Math.PI) }],
+        [16, { z: 0.15 * Math.sin(2 * Math.PI * phase) }],
+      ]);
+    });
+    expect(feed(new ContextClassifier(), frames).activity).toBe('running');
+  });
+
+  it('keeps idle confidence high for a still player with realistic landmark jitter', () => {
+    // ±7.5 mm uniform jitter per axis per frame — unfiltered finite differences would amplify
+    // it into phantom wrist speed of the same order as real gestures.
+    let seed = 42;
+    const rand = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648 - 0.5;
+    const frames = Array.from({ length: 90 }, (_, i) => {
+      const base = pose(T0 + i * FRAME_MS);
+      return {
+        ...base,
+        worldLandmarks: base.worldLandmarks.map((point) => ({
+          ...point,
+          x: point.x + rand() * 0.015,
+          y: point.y + rand() * 0.015,
+          z: point.z + rand() * 0.015,
+        })),
+      };
+    });
+    const decision = feed(new ContextClassifier(), frames);
+    expect(decision.activity).toBe('idle');
+    expect(decision.scores.idle).toBeGreaterThan(0.5);
+  });
+
+  it('does not blend evidence across a silent capture gap', () => {
+    const classifier = new ContextClassifier();
+    feed(classifier, swingingFrames(60));
+    // Player stops during a 5 s inference stall; no callbacks means no lost frames, so the
+    // resume frame is the first chance to notice the discontinuity.
+    const decision = feed(classifier, idleFrames(70, 5000 + 3000));
+    expect(decision.activity).toBe('idle');
+    expect(decision.scores.swinging).toBe(0);
+  });
+
+  it('pins the dwell: continuous winning evidence still takes ~700 ms to commit', () => {
+    // Empirical timeline for this fixture: swinging reaches enterScore at frame ~15; the commit
+    // lands at frame ~36 — exactly dwellMs later. With dwellMs mutated to zero the commit would
+    // land around frame ~18 instead, so the frame-30 assertion fails under mutation.
+    const classifier = new ContextClassifier();
+    const frames = swingingFrames(90);
+    let commitFrame = -1;
+    for (let i = 0; i < frames.length; i += 1) {
+      const decision = classifier.update(frames[i]!);
+      if (i === 30) expect(decision.activity).toBe('idle');
+      if (commitFrame < 0 && decision.activity === 'swinging') commitFrame = i;
+    }
+    expect(commitFrame).toBeGreaterThanOrEqual(33);
+    expect(commitFrame).toBeLessThan(60);
   });
 });

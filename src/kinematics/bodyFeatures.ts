@@ -1,5 +1,6 @@
 import type { CalibrationProfile, Point3, PoseSnapshot } from '../cv/protocol';
-import { bodyLocalPoint } from './bodyFrame';
+import { type BodyBasis, bodyBasis } from './bodyFrame';
+import { OneEuroFilter } from '../cv/oneEuroFilter';
 import { distance3, landmarkConfidence, midpoint } from './math';
 
 export interface Vec3 {
@@ -48,12 +49,14 @@ export interface CanonicalBodyFeatures {
   jointCosines: readonly number[];
   /** Per-landmark velocity in world axes, shoulder-widths/s; zero without a valid previous frame. */
   landmarkVelocities: readonly Vec3[];
-  /** Knee height along the body-local up axis (shoulder-width units); a raised knee reads higher. */
+  /**
+   * Knee height along the body-local up axis (shoulder-width units); a raised knee reads higher.
+   * NaN when the knee was not measurable this frame — consumers must skip non-finite values,
+   * since no numeric sentinel can represent a missing measurement inside the valid range.
+   */
   kneeLiftLeft: number;
   kneeLiftRight: number;
-  /** Mid-hip height in world units of shoulder widths; only deltas across frames are meaningful. */
-  midHipY: number;
-  /** Wrist velocity in world axes, shoulder-widths/s. */
+  /** Wrist velocity in the body-local frame, shoulder-widths/s, OneEuro-filtered. */
   wristVelocityLeft: Vec3;
   wristVelocityRight: Vec3;
   /** Wrist height above the shoulder line (shoulder widths); positive when the fist is raised. */
@@ -66,6 +69,10 @@ export interface CanonicalBodyFeatures {
 interface PreviousBody {
   timestampMs: number;
   world: readonly Point3[];
+  /** Filtered wrist world positions used as the base of the next velocity difference. */
+  filteredWrists: { left: Vec3; right: Vec3 };
+  /** Whether each wrist was usable in the previous frame (world and image confident). */
+  wristValid: { left: boolean; right: boolean };
 }
 
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 };
@@ -104,7 +111,9 @@ function usable(worldPoint: Point3 | undefined, imagePoint?: Point3): worldPoint
   return (
     isFinitePoint(worldPoint) &&
     landmarkConfidence(worldPoint) >= LANDMARK_MIN_CONFIDENCE &&
-    (!imagePoint || (isFinitePoint(imagePoint) && landmarkConfidence(imagePoint) >= LANDMARK_MIN_CONFIDENCE))
+    imagePoint !== undefined &&
+    isFinitePoint(imagePoint) &&
+    landmarkConfidence(imagePoint) >= LANDMARK_MIN_CONFIDENCE
   );
 }
 
@@ -127,6 +136,15 @@ function velocities(
   });
 }
 
+/** Rotates a world-axis vector into the body frame so lateral/forward mean body-relative directions. */
+function rotateIntoBody(vector: Vec3, basis: BodyBasis): Vec3 {
+  return {
+    x: vector.x * basis.side.x + vector.y * basis.side.y + vector.z * basis.side.z,
+    y: vector.x * basis.up.x + vector.y * basis.up.y + vector.z * basis.up.z,
+    z: vector.x * basis.depth.x + vector.y * basis.depth.y + vector.z * basis.depth.z,
+  };
+}
+
 /**
  * Converts pose snapshots into a scale- and orientation-normalized feature stream, mirroring
  * HandFeatureExtractor for the full body. Works without a calibration profile: normalization
@@ -137,6 +155,11 @@ export class BodyFeatureExtractor {
   private readonly maxVelocityGapMs: number;
   private previous?: PreviousBody;
   private lastTimestampMs?: number;
+  /** One filtering chain per wrist axis; positions are smoothed before differentiation. */
+  private readonly wristFilters = {
+    left: { x: new OneEuroFilter(), y: new OneEuroFilter(), z: new OneEuroFilter() },
+    right: { x: new OneEuroFilter(), y: new OneEuroFilter(), z: new OneEuroFilter() },
+  };
 
   constructor(options: { maxVelocityGapMs?: number } = {}) {
     this.maxVelocityGapMs = options.maxVelocityGapMs ?? 250;
@@ -154,15 +177,32 @@ export class BodyFeatureExtractor {
     this.lastTimestampMs = snapshot.timestampMs;
 
     const world = snapshot.worldLandmarks;
-    const leftShoulder = world[11];
-    const rightShoulder = world[12];
-    const leftHip = world[23];
-    const rightHip = world[24];
     const image = snapshot.landmarks;
-    const core = [leftShoulder, rightShoulder, leftHip, rightHip];
-    if (core.some((point) => !isFinitePoint(point)) || landmarkConfidence(...core) < CORE_MIN_CONFIDENCE
-      || landmarkConfidence(image[11]!, image[12]!, image[23]!, image[24]!) < CORE_MIN_CONFIDENCE) {
-      this.previous = undefined;
+    if (world.length < BODY_LANDMARK_COUNT) {
+      this.invalidateVelocityChain();
+      return undefined;
+    }
+    const leftShoulder = world[11]!;
+    const rightShoulder = world[12]!;
+    const leftHip = world[23]!;
+    const rightHip = world[24]!;
+    const coreWorld = [leftShoulder, rightShoulder, leftHip, rightHip];
+    const coreImage = [image[11], image[12], image[23], image[24]];
+    const coreBad =
+      coreWorld.some((point) => !isFinitePoint(point)) ||
+      !coreWorld.every((point) => landmarkConfidence(point) >= CORE_MIN_CONFIDENCE) ||
+      coreImage.some((point) => !isFinitePoint(point)) ||
+      !coreImage.every((point) => landmarkConfidence(point!) >= CORE_MIN_CONFIDENCE);
+    if (coreBad) {
+      this.invalidateVelocityChain();
+      return undefined;
+    }
+
+    // Degenerate geometry (shoulder line or torso direction collapsed) is rejected rather than
+    // clamped: MIN_SCALE only guards the arithmetic, it must not manufacture plausible garbage.
+    const basis = bodyBasis(leftShoulder, rightShoulder, leftHip, rightHip);
+    if (!basis) {
+      this.invalidateVelocityChain();
       return undefined;
     }
 
@@ -170,11 +210,20 @@ export class BodyFeatureExtractor {
     const hipMid = midpoint(leftHip, rightHip);
     const shoulderMid = midpoint(leftShoulder, rightShoulder);
 
+    const project = (point: Point3): Vec3 => {
+      const relX = point.x - hipMid.x;
+      const relY = point.y - hipMid.y;
+      const relZ = point.z - hipMid.z;
+      return {
+        x: (relX * basis.side.x + relY * basis.side.y + relZ * basis.side.z) / scale,
+        y: (relX * basis.up.x + relY * basis.up.y + relZ * basis.up.z) / scale,
+        z: (relX * basis.depth.x + relY * basis.depth.y + relZ * basis.depth.z) / scale,
+      };
+    };
+
     const landmarksLocal = world.map((point, index) => {
       if (!usable(point, image[index])) return ZERO;
-      return (
-        bodyLocalPoint(point, hipMid, leftShoulder, rightShoulder, leftHip, rightHip, scale) ?? ZERO
-      );
+      return project(point);
     });
 
     const jointCosines = BODY_JOINTS.map(([, a, b, c]) => {
@@ -187,6 +236,38 @@ export class BodyFeatureExtractor {
       previous !== undefined && snapshot.timestampMs - previous.timestampMs <= this.maxVelocityGapMs;
     const landmarkVelocities = velocities(world, image, gapValid ? previous : undefined, snapshot.timestampMs, scale);
 
+    // Wrist velocities follow a stricter path than the generic array: positions are OneEuro-filtered
+    // before differentiation (cm-level landmark jitter otherwise amplifies into phantom speed), the
+    // difference requires both endpoints usable in world and image, and the result is rotated into
+    // the body frame so x/z mean body-lateral/body-forward regardless of player yaw.
+    const filterWrist = (index: number, side: 'left' | 'right'): Vec3 | undefined => {
+      const point = world[index];
+      if (!usable(point, image[index])) return undefined;
+      const filters = this.wristFilters[side];
+      return {
+        x: filters.x.filter(point.x, snapshot.timestampMs),
+        y: filters.y.filter(point.y, snapshot.timestampMs),
+        z: filters.z.filter(point.z, snapshot.timestampMs),
+      };
+    };
+    const filteredLeft = filterWrist(LEFT_WRIST, 'left');
+    const filteredRight = filterWrist(RIGHT_WRIST, 'right');
+
+    const wristVelocity = (filtered: Vec3 | undefined, base: Vec3 | undefined, validBefore: boolean | undefined): Vec3 => {
+      const seconds = previous ? (snapshot.timestampMs - previous.timestampMs) / 1000 : 0;
+      if (!filtered || !base || validBefore !== true || !gapValid || seconds <= 0) return ZERO;
+      return rotateIntoBody(
+        {
+          x: (filtered.x - base.x) / seconds / scale,
+          y: (filtered.y - base.y) / seconds / scale,
+          z: (filtered.z - base.z) / seconds / scale,
+        },
+        basis,
+      );
+    };
+    const wristVelocityLeft = wristVelocity(filteredLeft, previous?.filteredWrists.left, previous?.wristValid.left);
+    const wristVelocityRight = wristVelocity(filteredRight, previous?.filteredWrists.right, previous?.wristValid.right);
+
     const height = (index: number) => {
       const point = world[index];
       return usable(point, image[index]) ? (shoulderMid.y - point.y) / scale : 0;
@@ -197,11 +278,10 @@ export class BodyFeatureExtractor {
       landmarksLocal,
       jointCosines,
       landmarkVelocities,
-      kneeLiftLeft: landmarksLocal[LEFT_KNEE]!.y,
-      kneeLiftRight: landmarksLocal[RIGHT_KNEE]!.y,
-      midHipY: hipMid.y / scale,
-      wristVelocityLeft: landmarkVelocities[LEFT_WRIST]!,
-      wristVelocityRight: landmarkVelocities[RIGHT_WRIST]!,
+      kneeLiftLeft: usable(world[LEFT_KNEE], image[LEFT_KNEE]) ? landmarksLocal[LEFT_KNEE]!.y : NaN,
+      kneeLiftRight: usable(world[RIGHT_KNEE], image[RIGHT_KNEE]) ? landmarksLocal[RIGHT_KNEE]!.y : NaN,
+      wristVelocityLeft,
+      wristVelocityRight,
       wristHeightLeft: height(LEFT_WRIST),
       wristHeightRight: height(RIGHT_WRIST),
       stanceWidth:
@@ -211,12 +291,30 @@ export class BodyFeatureExtractor {
           : 0,
     };
 
-    this.previous = { timestampMs: snapshot.timestampMs, world };
+    this.previous = {
+      timestampMs: snapshot.timestampMs,
+      world,
+      filteredWrists: {
+        left: filteredLeft ?? { x: 0, y: 0, z: 0 },
+        right: filteredRight ?? { x: 0, y: 0, z: 0 },
+      },
+      wristValid: { left: filteredLeft !== undefined, right: filteredRight !== undefined },
+    };
     return features;
   }
 
   reset(): void {
     this.previous = undefined;
     this.lastTimestampMs = undefined;
+    for (const side of ['left', 'right'] as const) {
+      for (const axis of ['x', 'y', 'z'] as const) this.wristFilters[side][axis].reset();
+    }
+  }
+
+  private invalidateVelocityChain(): void {
+    this.previous = undefined;
+    for (const side of ['left', 'right'] as const) {
+      for (const axis of ['x', 'y', 'z'] as const) this.wristFilters[side][axis].reset();
+    }
   }
 }

@@ -28,16 +28,22 @@ function cross(a: Point3, b: Point3): Point3 {
   };
 }
 
-export function bodyLocalPoint(
-  point: Point3,
-  shoulder: Point3,
+export interface BodyBasis {
+  side: Point3;
+  up: Point3;
+  depth: Point3;
+}
+
+/**
+ * Orthonormal body frame: shoulder-line side, torso up orthogonalized against it, depth as
+ * their cross product. Undefined when the shoulder line or the torso direction is degenerate.
+ */
+export function bodyBasis(
   leftShoulder: Point3,
   rightShoulder: Point3,
   leftHip: Point3,
   rightHip: Point3,
-  scale: number,
-): Point3 | undefined {
-  if (!Number.isFinite(scale) || scale <= EPSILON) return undefined;
+): BodyBasis | undefined {
   const side = normalize(subtract(rightShoulder, leftShoulder));
   if (!side) return undefined;
 
@@ -53,12 +59,27 @@ export function bodyLocalPoint(
   if (!up) return undefined;
   const depth = normalize(cross(side, up));
   if (!depth) return undefined;
+  return { side, up, depth };
+}
+
+export function bodyLocalPoint(
+  point: Point3,
+  shoulder: Point3,
+  leftShoulder: Point3,
+  rightShoulder: Point3,
+  leftHip: Point3,
+  rightHip: Point3,
+  scale: number,
+): Point3 | undefined {
+  if (!Number.isFinite(scale) || scale <= EPSILON) return undefined;
+  const basis = bodyBasis(leftShoulder, rightShoulder, leftHip, rightHip);
+  if (!basis) return undefined;
 
   const relative = subtract(point, shoulder);
   return {
-    x: dot(relative, side) / scale,
-    y: dot(relative, up) / scale,
-    z: dot(relative, depth) / scale,
+    x: dot(relative, basis.side) / scale,
+    y: dot(relative, basis.up) / scale,
+    z: dot(relative, basis.depth) / scale,
   };
 }
 
