@@ -44,6 +44,12 @@ describe('landmark confidence', () => {
     expect(landmarkConfidence()).toBe(0);
     expect(landmarkConfidence({ x: 0, y: 0, z: 0, presence: 0.8 })).toBe(0.8);
   });
+
+  it('returns zero for non-finite confidence instead of propagating it', () => {
+    expect(landmarkConfidence({ x: 0, y: 0, z: 0, visibility: Number.NaN })).toBe(0);
+    expect(landmarkConfidence({ x: 0, y: 0, z: 0, visibility: Number.NaN, presence: 0.9 })).toBe(0);
+    expect(landmarkConfidence({ x: 0, y: 0, z: 0, visibility: Number.POSITIVE_INFINITY, presence: 0.9 })).toBe(0.9);
+  });
 });
 
 describe('cadence tracker', () => {
@@ -259,6 +265,13 @@ describe('swing detector', () => {
 });
 
 describe('world-space posture calibration', () => {
+  it('rejects calibration when confidence is NaN instead of counting those frames as valid', () => {
+    const calibrator = new Calibrator();
+    calibrator.start(0);
+    for (let time = 0; time <= 3000; time += 100) calibrator.add(pose(time, { confidence: Number.NaN }));
+    expect(calibrator.finish()).toBeNull();
+  });
+
   it('stores the leg-derived vertical and the habitual lean baseline', () => {
     const calibrator = new Calibrator();
     calibrator.start(0);
