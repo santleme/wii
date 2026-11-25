@@ -23,13 +23,16 @@ export class AutoCalibrator {
   update(snapshot: PoseSnapshot, needsStance = false): CalibrationStep {
     const required = needsStance ? REQUIRED_STANCE : REQUIRED;
     const visible = required.every((index) => snapshot.landmarks[index]) && landmarkConfidence(...required.map((index) => snapshot.landmarks[index]!)) >= 0.55;
-    if (snapshot.trackingState === 'lost' || (!visible && !this.collecting)) {
+    // Antes da coleta não há investimento a proteger: qualquer estado ruim reinicia do framing.
+    if (!this.collecting && (snapshot.trackingState === 'lost' || !visible)) {
       this.reset();
       return { phase: 'framing', progress: 0 };
     }
-    // Um quadro ruim isolado não reinicia a contagem — mas durante a coleta ele conta no
-    // denominador de cobertura e no prazo: o Calibrator ignora quadros inválidos nas medianas,
-    // não no total, e atingido o prazo a tentativa se encerra mesmo sem voltar a enxergar.
+    // Durante a coleta todo quadro ruim conta no denominador de cobertura e no prazo —
+    // degradado, fora de enquadramento ou rastreamento perdido: o Calibrator ignora quadros
+    // inválidos nas medianas, não no total, e atingido o prazo a tentativa se encerra mesmo
+    // sem voltar a enxergar. Uma perda de ~130 ms no meio de uma janela de 3 s não deve
+    // descartar os ~2,9 s de amostras válidas que a cercam.
     if (snapshot.trackingState !== 'tracked' || !visible) {
       if (this.collecting) {
         this.calibrator.add(snapshot);

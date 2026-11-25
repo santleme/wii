@@ -861,3 +861,40 @@ it('tolera um quadro ruim isolado no meio da coleta', () => {
   const steps = Array.from({ length: 61 }, (_, i) => auto.update(pose(i * 100, { confidence: i === 25 ? 0.1 : 0.95 })));
   expect(steps.some((step) => step.profile)).toBe(true);
 });
+
+const lostPose = (time: number) => ({ ...pose(time), landmarks: [], worldLandmarks: [], trackingState: 'lost' as const });
+
+it('absorve uma perda curta de rastreamento na cobertura da coleta', () => {
+  const auto = new AutoCalibrator();
+  // ~600 ms sem pose no meio da janela: ~20% dos quadros — a cobertura de 65% ainda aprova.
+  const steps = Array.from({ length: 61 }, (_, i) => auto.update(i >= 20 && i < 26 ? lostPose(i * 100) : pose(i * 100)));
+  expect(steps.some((step) => step.profile)).toBe(true);
+});
+
+it('encerra a tentativa no prazo mesmo quando o rastreamento não volta', () => {
+  const auto = new AutoCalibrator();
+  // Coleta começa (~1 s) e a pose some de vez: o prazo encerra a tentativa, a cobertura
+  // rejeita e o framing retorna — nada de coleta travada nem reset antecipado.
+  const steps = Array.from({ length: 61 }, (_, i) => auto.update(i <= 12 ? pose(i * 100) : lostPose(i * 100)));
+  expect(steps.some((step) => step.phase === 'collecting')).toBe(true);
+  expect(steps.some((step) => step.profile)).toBe(false);
+  expect(steps.at(-1)?.phase).toBe('framing');
+});
+
+it('rejeita pela cobertura e retenta quando a perda cobre boa parte da janela', () => {
+  const auto = new AutoCalibrator();
+  // 1,2 s sem pose numa janela de 3 s: ~60% de válidos, abaixo dos 65% — a tentativa morre
+  // na cobertura, não no reset, e a coleta recomeça com o corpo de volta.
+  const steps = Array.from({ length: 61 }, (_, i) => auto.update(i >= 20 && i < 32 ? lostPose(i * 100) : pose(i * 100)));
+  expect(steps.some((step) => step.profile)).toBe(false);
+  expect(steps.at(-1)?.phase).toBe('collecting');
+});
+
+it('reinicia o repouso quando o rastreamento se perde antes de coletar', () => {
+  const auto = new AutoCalibrator();
+  // Perda durante o settling não tem coleta a proteger: o repouso recomeça do zero.
+  const steps = Array.from({ length: 61 }, (_, i) => auto.update(i >= 5 && i < 9 ? lostPose(i * 100) : pose(i * 100)));
+  const firstCollect = steps.findIndex((step) => step.phase === 'collecting');
+  expect(firstCollect).toBeGreaterThanOrEqual(19);
+  expect(steps.some((step) => step.profile)).toBe(true);
+});
