@@ -35,6 +35,14 @@ export class AutoCalibrator {
     // descartar os ~2,9 s de amostras válidas que a cercam.
     if (snapshot.trackingState !== 'tracked' || !visible) {
       if (this.collecting) {
+        // Um frame visível prova onde o corpo está mesmo sem o gate ter voltado a 'tracked':
+        // antes de entrar na cobertura ele re-verifica a imobilidade — flapping após um
+        // blecaute não pode esconder um deslocamento que contaminaria as medianas. Só um
+        // frame 'tracked' prova estabilidade para re-ancorar; aqui, mover derruba a tentativa.
+        if (visible && this.moved(snapshot)) {
+          this.reset();
+          return { phase: 'framing', progress: 0 };
+        }
         this.calibrator.add(snapshot);
         const progress = Math.max(0, Math.min(1, (snapshot.timestampMs - this.anchor!.since - SETTLE_MS) / COLLECT_MS));
         return progress < 1 ? { phase: 'collecting', progress } : this.conclude(needsStance);
@@ -45,7 +53,7 @@ export class AutoCalibrator {
     const l = snapshot.landmarks;
     const shoulders = midpoint(l[11]!, l[12]!);
     const hips = midpoint(l[23]!, l[24]!);
-    if (!this.anchor || distance2(shoulders, this.anchor.shoulders) > STILL_TOLERANCE || distance2(hips, this.anchor.hips) > STILL_TOLERANCE) {
+    if (!this.anchor || this.moved(snapshot)) {
       this.reset();
       this.anchor = { shoulders, hips, since: snapshot.timestampMs };
     }
@@ -59,6 +67,13 @@ export class AutoCalibrator {
     const progress = Math.min(1, (stillMs - SETTLE_MS) / COLLECT_MS);
     if (progress < 1) return { phase: 'collecting', progress };
     return this.conclude(needsStance);
+  }
+
+  /** Ombros ou quadris se afastaram da âncora além da tolerância de parado. Requer âncora viva. */
+  private moved(snapshot: PoseSnapshot): boolean {
+    const l = snapshot.landmarks;
+    return distance2(midpoint(l[11]!, l[12]!), this.anchor!.shoulders) > STILL_TOLERANCE
+      || distance2(midpoint(l[23]!, l[24]!), this.anchor!.hips) > STILL_TOLERANCE;
   }
 
   private conclude(needsStance: boolean): CalibrationStep {
