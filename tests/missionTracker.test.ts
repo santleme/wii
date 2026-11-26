@@ -66,6 +66,19 @@ describe('mission tracker', () => {
     expect(progressStore.load('track').xp).toBe(MISSION_XP);
   });
 
+  it('only grants mission xp once when open tabs race from stale trackers', () => {
+    const missionBacking = new MemoryStorage();
+    const progressStore = new ProgressStore();
+    const firstTab = new MissionTracker(new MissionStore(missionBacking), '2026-11-25', mission);
+    const secondTab = new MissionTracker(new MissionStore(missionBacking), '2026-11-25', mission);
+
+    if (firstTab.update(100)) progressStore.addXp('track', MISSION_XP);
+    if (secondTab.update(100)) progressStore.addXp('track', MISSION_XP);
+
+    expect(progressStore.load('track').xp).toBe(MISSION_XP);
+    expect(secondTab.isCompleted).toBe(true);
+  });
+
   it('ignores malformed samples instead of corrupting progress', () => {
     const tracker = new MissionTracker(new MissionStore(new MemoryStorage()), '2026-11-25', mission);
     tracker.update(Number.NaN);

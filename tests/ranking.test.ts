@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseRanking, rankRun } from '../src/games/track/ranking';
+import { highestRankedScore, parseRanking, rankRun } from '../src/games/track/ranking';
 
 describe('personal ranking', () => {
   it('places the run among the previous ones', () => {
@@ -15,5 +15,10 @@ describe('personal ranking', () => {
     expect(parseRanking('oops')).toEqual([]);
     expect(parseRanking('{"a":1}')).toEqual([]);
     expect(parseRanking('[10,"x",null,5]')).toEqual([10, 5]);
+  });
+
+  it('finds the highest legacy score even if stored ranking order is malformed', () => {
+    expect(parseRanking('[300,1200,500]')).toEqual([300, 1200, 500]);
+    expect(highestRankedScore([300, 1200, 500])).toBe(1200);
   });
 });

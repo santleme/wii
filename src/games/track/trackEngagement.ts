@@ -18,3 +18,10 @@ export function trackMissionValue(metric: MissionMetric, sample: TrackMissionSam
   if (metric === 'combo') return sample.bestCombo;
   return 0;
 }
+
+/** Uses the run's peak so a later penalty cannot make a passed record look unreachable. */
+export function trackRecordChase(bestScore: number, runPeak: number): string | undefined {
+  if (!Number.isFinite(bestScore) || bestScore <= 0) return undefined;
+  const gap = bestScore - Math.max(0, Number.isFinite(runPeak) ? runPeak : 0);
+  return gap >= 0 ? `FALTAM ${gap + 1} P/ RECORDE` : 'RITMO DE RECORDE';
+}

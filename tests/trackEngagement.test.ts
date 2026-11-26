@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { trackMissionValue, trackRunXp } from '../src/games/track/trackEngagement';
+import { trackMissionValue, trackRecordChase, trackRunXp } from '../src/games/track/trackEngagement';
 
 describe('track engagement metrics', () => {
   it('converts the final run score to xp by dividing by ten and rounding down', () => {
@@ -18,5 +18,11 @@ describe('track engagement metrics', () => {
 
   it('ignores mission metrics owned by other sports', () => {
     expect(trackMissionValue('rally', { score: 950, bestCombo: 4 })).toBe(0);
+  });
+
+  it('keeps a surpassed record marked as reachable after the live score drops', () => {
+    expect(trackRecordChase(1200, 1250)).toBe('RITMO DE RECORDE');
+    expect(trackRecordChase(1200, 1100)).toBe('FALTAM 101 P/ RECORDE');
+    expect(trackRecordChase(0, 1250)).toBeUndefined();
   });
 });

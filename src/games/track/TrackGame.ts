@@ -2,10 +2,9 @@ import * as THREE from 'three';
 import type { SportActionEvent } from '../../cv/protocol';
 import { GameLoop } from '../core/GameLoop';
 import type { GameHudState as CoreGameHudState } from '../core/hud';
-import { dailyMissionFor, localDateIso, MISSION_XP } from '../engagement/missions';
-import { createBrowserMissionStore } from '../engagement/missionStore';
-import { MissionTracker } from '../engagement/missionTracker';
-import { createBrowserProgressStore } from '../engagement/progressStore';
+import { localDateIso, MISSION_XP } from '../engagement/missions';
+import { getBrowserEngagementStores } from '../engagement/browserStores';
+import { DailyMissionSession } from '../engagement/dailyMissionSession';
 import { progressionFor } from '../engagement/progression';
 import { hash32, mulberry32 } from '../engagement/seededRandom';
 import { type Feedback, awardText, SHAKE_DURATION_S, shakeOffset } from './feedback';
@@ -13,11 +12,11 @@ import { applySprint, applyStep, easeSpeed, type Gait, gaitFor, nextPace, type P
 import { HurdleFlow, type ItemKind, RUNNER_Z } from './hurdleFlow';
 import { ItemAssets } from './itemAssets';
 import { JUMP_DURATION_S, jumpHeight } from './jump';
-import { parseRanking, type RunResult, rankRun } from './ranking';
+import { highestRankedScore, parseRanking, type RunResult, rankRun } from './ranking';
 import { RunGate } from './runGate';
 import { fovFor, scrollZ, timeBoost } from './scroll';
 import { type Lane, nextKind, nextLane } from './spawn';
-import { trackMissionValue, trackRunXp } from './trackEngagement';
+import { trackMissionValue, trackRecordChase, trackRunXp } from './trackEngagement';
 import { isPerfectJump, TrackScore } from './trackScore';
 
 export interface TrackRunResult extends RunResult {
@@ -40,6 +39,14 @@ const SCENERY_MAX_Z = 14;
 const RANKING_KEY = 'wii-track-ranking';
 const GAIT_STATUS: Record<Gait, string> = { idle: 'Parado', walk: 'Andando', run: 'Correndo' };
 
+function readTrackRanking(): number[] {
+  try { return parseRanking(localStorage.getItem(RANKING_KEY)); } catch { return []; }
+}
+
+function writeTrackRanking(ranking: number[]): void {
+  try { localStorage.setItem(RANKING_KEY, JSON.stringify(ranking)); } catch {}
+}
+
 export class TrackGame {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(52, 1, 0.1, 120);
@@ -52,10 +59,10 @@ export class TrackGame {
   private readonly itemAssets = new ItemAssets();
   private readonly loop: GameLoop;
   private readonly hudTimer: number;
-  private readonly progressStore = createBrowserProgressStore();
+  private readonly engagementStores = getBrowserEngagementStores();
+  private readonly progressStore = this.engagementStores.progress;
   private readonly missionDate = localDateIso(new Date());
-  private readonly mission = dailyMissionFor('track', this.missionDate);
-  private readonly missionTracker = new MissionTracker(createBrowserMissionStore(), this.missionDate, this.mission);
+  private readonly missionSession = new DailyMissionSession(this.engagementStores.missions, 'track', this.missionDate);
   /** The day's obstacle sequence is repeatable; spawn timing still depends on the player's movement. */
   private readonly spawnRandom = mulberry32(hash32(`${this.missionDate}:track`));
   private progress = this.progressStore.load('track');
@@ -80,6 +87,7 @@ export class TrackGame {
   private status = 'Ande ou corra no lugar com a câmera, ou use ↓';
 
   constructor(canvas: HTMLCanvasElement, private readonly onHud: (state: GameHudState) => void) {
+    this.progress = this.progressStore.ensureBestScore('track', highestRankedScore(readTrackRanking()));
     this.scene.background = new THREE.Color(0x223038);
     this.scene.fog = new THREE.Fog(0x223038, 25, 75);
     this.camera.position.set(0, 3.4, 11);
@@ -241,11 +249,11 @@ export class TrackGame {
   }
 
   private updateMission(): void {
-    const current = trackMissionValue(this.mission.metric, {
+    const current = trackMissionValue(this.missionSession.mission.metric, {
       score: this.score.peak,
       bestCombo: this.score.bestComboCount,
     });
-    if (!this.missionTracker.update(current)) return;
+    if (!this.missionSession.tracker.update(current)) return;
     const reward = this.progressStore.addXp('track', MISSION_XP);
     this.progress = reward.progress;
     const rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
@@ -260,8 +268,7 @@ export class TrackGame {
     const progressResult = this.progressStore.record('track', finalScore, xpEarned);
     this.progress = progressResult.progress;
 
-    let previous: number[] = [];
-    try { previous = parseRanking(localStorage.getItem(RANKING_KEY)); } catch {}
+    const previous = readTrackRanking();
     const achievement = progressResult.rankUp
       ? `RANK ${progressResult.after.rank}`
       : progressResult.isRecord
@@ -273,7 +280,7 @@ export class TrackGame {
       bestCombo: this.score.bestComboCount,
       achievement,
     };
-    try { localStorage.setItem(RANKING_KEY, JSON.stringify(this.result.ranking)); } catch {}
+    writeTrackRanking(this.result.ranking);
 
     if (progressResult.rankUp) this.showFeedback('milestone', `RANK ${progressResult.after.rank}!`);
     else if (progressResult.isRecord) this.showFeedback('milestone', 'NOVO RECORDE!');
@@ -285,8 +292,8 @@ export class TrackGame {
     const speed = Math.round(this.shownSpeed * 100) / 100;
     const { combo } = this.score;
     const rank = progressionFor(this.progress.xp);
-    const missionLabel = this.missionTracker.label();
-    const missionProgress01 = this.missionTracker.progress01();
+    const missionLabel = this.missionSession.tracker.label();
+    const missionProgress01 = this.missionSession.tracker.progress01();
     const banner = this.result
       ? undefined
       : this.gate.phase === 'countdown'
@@ -294,12 +301,7 @@ export class TrackGame {
       : this.gate.phase === 'paused'
         ? { title: 'PAUSADO', detail: 'Tracking perdido · volte ao quadro ou aperte uma tecla para seguir no teclado' }
         : undefined;
-    const chaseGap = this.progress.bestScore - score;
-    const chase = !this.result && this.progress.bestScore > 0
-      ? chaseGap >= 0
-        ? `FALTAM ${chaseGap + 1} P/ RECORDE`
-        : 'RITMO DE RECORDE'
-      : undefined;
+    const chase = this.result ? undefined : trackRecordChase(this.progress.bestScore, this.score.peak);
     const detail = this.result
       ? `FINAL ${this.result.points} · COMBO MÁX ×${this.result.bestCombo} · +${this.result.xpEarned} XP${this.result.achievement ? ` · ${this.result.achievement}` : ''}`
       : chase;

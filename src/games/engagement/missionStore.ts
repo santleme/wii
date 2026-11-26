@@ -22,15 +22,16 @@ export class MissionStore {
     return (this.read().days[this.key(dateIso, sport)] ?? []).includes(missionId);
   }
 
-  complete(dateIso: string, sport: SportKey, missionId: string): void {
+  complete(dateIso: string, sport: SportKey, missionId: string): boolean {
     const data = this.read();
     const key = this.key(dateIso, sport);
     const completed = data.days[key] ?? [];
-    if (completed.includes(missionId)) return;
+    if (completed.includes(missionId)) return false;
     const days: Record<string, string[]> = { ...data.days, [key]: [...completed, missionId] };
     const keys = Object.keys(days).sort().reverse();
     for (const oldKey of keys.slice(MAX_STORED_DAYS)) delete days[oldKey];
     this.write({ version: 1, days });
+    return true;
   }
 
   private key(dateIso: string, sport: SportKey): string {

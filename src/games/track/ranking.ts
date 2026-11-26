@@ -22,3 +22,7 @@ export function parseRanking(raw: string | null): number[] {
     return [];
   }
 }
+
+export function highestRankedScore(ranking: readonly number[]): number {
+  return ranking.reduce((highest, score) => Number.isFinite(score) ? Math.max(highest, score) : highest, 0);
+}

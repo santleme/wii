@@ -91,12 +91,14 @@ function GameRun({ sport, onEngine, tracking, audio, onRestart }: Props & { onRe
         {hud.rankProgress01 !== undefined && <div className="rank-progress"><i style={{ width: `${Math.round(hud.rankProgress01 * 100)}%` }} /></div>}
       </div>
     </div>
-    {hud.missionLabel && <div className="game-mission">
-      <span>MISSÃO DE HOJE</span>
-      <strong>{hud.missionLabel}</strong>
-      {hud.missionProgress01 !== undefined && <i><b style={{ width: `${Math.round(hud.missionProgress01 * 100)}%` }} /></i>}
+    {(hud.missionLabel || hud.detail) && <div className="game-info">
+      {hud.detail && <div className="game-detail">{hud.detail}</div>}
+      {hud.missionLabel && <div className="game-mission">
+        <span>MISSÃO DE HOJE</span>
+        <strong>{hud.missionLabel}</strong>
+        {hud.missionProgress01 !== undefined && <i><b style={{ width: `${Math.round(hud.missionProgress01 * 100)}%` }} /></i>}
+      </div>}
     </div>}
-    {hud.detail && <div className="game-detail">{hud.detail}</div>}
     {hud.feedback && <div key={hud.feedback.id} className={`game-feedback ${('kind' in hud.feedback ? hud.feedback.kind : hud.feedback.tone)}`}>
       <span>{hud.feedback.text}</span>
     </div>}
