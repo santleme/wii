@@ -9,12 +9,26 @@ import {
   mapWallTimestampToSimulationMs,
   MAX_FRAME_DELTA_SECONDS,
 } from '../core/fixedStepTiming';
+import { dailyMissionFor, localDateIso, MISSION_XP } from '../engagement/missions';
+import { createBrowserMissionStore } from '../engagement/missionStore';
+import { MissionTracker } from '../engagement/missionTracker';
+import { createBrowserProgressStore } from '../engagement/progressStore';
+import { progressionFor, type ProgressRecordResult } from '../engagement/progression';
 import { advanceBall, createBall, solveOutgoing, timeAtPlane, type BallState } from './ballistics';
 import { adjudicateContact, type ContactOutcome } from './contactAdjudicator';
 import { adaptOpponentSkill, createOpponentAi, decideReturn, type OpponentAiState } from './opponentAi';
 import { ballAtPlannedContact, resolveScheduledOpponentReturn, type OpponentHitPlan } from './opponentReturn';
 import { advancePlayerShotToNow, crossesNetBelowCord } from './rallyPhysics';
-import { awardPoint, createScore, pointLabels, type PlayerSide, type TennisScoreState } from './tennisScore';
+import { tennisMissionValue } from './tennisEngagement';
+import {
+  awardPoint,
+  createScore,
+  matchPerformance,
+  matchXp,
+  pointLabels,
+  type PlayerSide,
+  type TennisScoreState,
+} from './tennisScore';
 
 /**
  * Wii-Sports-style tennis: a game of WHEN, not WHERE. The player never aims with the arm —
@@ -66,6 +80,11 @@ export class TennisGame {
   private readonly opponentRacket: THREE.Group;
   private readonly loop: GameLoop;
   private readonly hudTimer: number;
+  private readonly progressStore = createBrowserProgressStore();
+  private readonly missionDate = localDateIso(new Date());
+  private readonly mission = dailyMissionFor('tennis', this.missionDate);
+  private readonly missionTracker = new MissionTracker(createBrowserMissionStore(), this.missionDate, this.mission);
+  private progress = this.progressStore.load('tennis');
 
   private ball: BallState | null = null;
   private tape: TapeEntry[] = [];
@@ -86,6 +105,12 @@ export class TennisGame {
   private feedback: { id: number; text: string; tone: 'good' | 'bad' | 'neutral' } | undefined;
   private feedbackCounter = 0;
   private lastHitInfo = '';
+  private pointsWon = 0;
+  private pointsLost = 0;
+  private rallyExchanges = 0;
+  private bestRally = 0;
+  private matchRecorded = false;
+  private matchSummary = '';
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -266,6 +291,7 @@ export class TennisGame {
     this.wallToSimulationOffsetMs = now - wallNow;
     this.phase = { kind: 'rally' };
     this.opponentHitPlan = null;
+    this.rallyExchanges += 1;
     this.audio?.hit(0.4 + 0.6 * outcome.quality01);
     if (advancedShot.netFault) {
       this.endPoint('opponent', 'NA REDE!', now);
@@ -322,6 +348,7 @@ export class TennisGame {
     this.stepPhase(dt, now);
     this.stepAvatars(dt);
     this.stepBall(dt, now);
+    this.updateMission();
     this.stepAnimations(dt);
     this.render();
   }
@@ -341,11 +368,7 @@ export class TennisGame {
         if (now >= this.phase.resumeAtMs) this.startPoint(now);
         break;
       case 'match-over':
-        if (now >= this.phase.restartAtMs) {
-          this.score = createScore('player');
-          this.opponentAi = createOpponentAi();
-          this.startPoint(now);
-        }
+        if (now >= this.phase.restartAtMs) this.resetMatch(now);
         break;
       case 'player-serve': {
         // Toss missed and the ball came back down: re-toss quietly, no penalty.
@@ -364,6 +387,7 @@ export class TennisGame {
           this.tape = [{ tMs: now, ball: this.ball }];
           this.opponentSwingT = 0;
           this.phase = { kind: 'rally' };
+          this.rallyExchanges = 1;
           this.audio?.hit(0.5);
           this.status = 'Saque do adversário — prepare-se';
         }
@@ -471,6 +495,7 @@ export class TennisGame {
       );
       this.tape = [{ tMs: now, ball: this.ball }];
       this.opponentSwingT = 0;
+      this.rallyExchanges += 1;
       this.audio?.hit(0.45);
     }
   }
@@ -488,25 +513,106 @@ export class TennisGame {
     this.score = result.state;
     this.opponentAi = adaptOpponentSkill(this.opponentAi, winner);
     this.opponentHitPlan = null;
+    if (winner === 'player') this.pointsWon += 1;
+    else this.pointsLost += 1;
+    this.bestRally = Math.max(this.bestRally, this.rallyExchanges);
+    const rally = this.rallyExchanges;
+    this.rallyExchanges = 0;
 
     const youWon = winner === 'player';
     this.setFeedback(headline, youWon ? 'good' : 'bad');
     if (result.matchWonBy) {
+      const completion = this.finishMatch(result.matchWonBy);
       this.phase = { kind: 'match-over', restartAtMs: now + MATCH_PAUSE_S * 1000 };
       this.status = result.matchWonBy === 'player' ? 'VOCÊ VENCEU A PARTIDA!' : 'Adversário venceu a partida';
-      this.audio?.milestone();
+      // A mission completed by the last point is acknowledged first; the match achievement
+      // then takes priority in the single feedback slot.
+      const missionJustCompleted = this.updateMission();
+      if (completion?.record.rankUp) this.setFeedback(`RANK ${completion.record.after.rank}!`, 'good');
+      else if (completion?.record.isRecord) this.setFeedback('NOVO RECORDE!', 'good');
+      else if (!missionJustCompleted) {
+        this.setFeedback(
+          result.matchWonBy === 'player' ? 'VITÓRIA!' : 'FIM DE PARTIDA',
+          result.matchWonBy === 'player' ? 'good' : 'bad',
+        );
+      }
+      if (!missionJustCompleted) this.audio?.milestone();
     } else if (result.gameWonBy) {
       this.phase = { kind: 'point-over', resumeAtMs: now + POINT_PAUSE_S * 1500 };
-      this.status = result.gameWonBy === 'player' ? 'GAME SEU!' : 'Game do adversário';
+      this.status = `${result.gameWonBy === 'player' ? 'GAME SEU!' : 'Game do adversário'} · rally ${rally}`;
       this.audio?.milestone();
     } else {
       this.phase = { kind: 'point-over', resumeAtMs: now + POINT_PAUSE_S * 1000 };
-      this.status = youWon ? 'Ponto seu!' : 'Ponto do adversário';
+      this.status = `${youWon ? 'Ponto seu!' : 'Ponto do adversário'} · rally ${rally}`;
       if (youWon) this.audio?.success(1);
       else this.audio?.failure();
     }
     this.ball = null;
     this.tape = [];
+  }
+
+  private livePerformanceScore(): number {
+    return matchPerformance({
+      pointsWon: this.pointsWon,
+      gamesWon: this.score.games.player,
+      won: this.score.matchWinner === 'player',
+      bestRally: Math.max(this.bestRally, this.rallyExchanges),
+    });
+  }
+
+  private currentMissionValue(): number {
+    return tennisMissionValue(this.mission.metric, {
+      performance: this.livePerformanceScore(),
+      bestRally: Math.max(this.bestRally, this.rallyExchanges),
+      won: this.score.matchWinner === 'player',
+    });
+  }
+
+  private updateMission(): boolean {
+    if (!this.missionTracker.update(this.currentMissionValue())) return false;
+    const reward = this.progressStore.addXp('tennis', MISSION_XP);
+    this.progress = reward.progress;
+    const rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
+    this.setFeedback(`MISSÃO +${MISSION_XP} XP${rankUp}`, 'good');
+    this.audio?.milestone();
+    return true;
+  }
+
+  private finishMatch(winner: PlayerSide): { performanceScore: number; xpEarned: number; record: ProgressRecordResult } | undefined {
+    if (this.matchRecorded) return undefined;
+    this.matchRecorded = true;
+    const performanceScore = matchPerformance({
+      pointsWon: this.pointsWon,
+      gamesWon: this.score.games.player,
+      won: winner === 'player',
+      bestRally: this.bestRally,
+    });
+    const xpEarned = matchXp(performanceScore);
+    const record = this.progressStore.record('tennis', performanceScore, xpEarned);
+    this.progress = record.progress;
+    const achievement = record.rankUp ? ` · RANK ${record.after.rank}` : record.isRecord ? ' · NOVO RECORDE' : '';
+    this.matchSummary = `DESEMPENHO ${performanceScore} · PONTOS ${this.pointsWon}×${this.pointsLost} · MELHOR RALLY ${this.bestRally} · +${xpEarned} XP${achievement}`;
+    return { performanceScore, xpEarned, record };
+  }
+
+  private resetMatch(now: number): void {
+    this.score = createScore('player');
+    this.opponentAi = createOpponentAi();
+    this.pointsWon = 0;
+    this.pointsLost = 0;
+    this.rallyExchanges = 0;
+    this.bestRally = 0;
+    this.matchRecorded = false;
+    this.matchSummary = '';
+    this.lastHitInfo = '';
+    this.playerX = 0;
+    this.opponentX = 0;
+    this.playerLateralSpeed = 0;
+    this.ball = null;
+    this.tape = [];
+    this.opponentHitPlan = null;
+    this.missionTracker.resetValue();
+    this.startPoint(now);
   }
 
   private stepAvatars(dt: number): void {
@@ -562,14 +668,30 @@ export class TennisGame {
 
   private publishHud(): void {
     const labels = pointLabels(this.score);
+    const livePerformance = this.livePerformanceScore();
+    const rank = progressionFor(this.progress.xp);
+    const server = this.score.server === 'player' ? 'SAQUE SEU' : 'SAQUE DO ADVERSÁRIO';
+    const timing = this.lastHitInfo ? `${this.lastHitInfo} · ` : '';
+    const gap = this.progress.bestScore - livePerformance;
+    const chase = this.progress.bestScore > 0
+      ? gap >= 0
+        ? ` · FALTAM ${gap + 1} P/ RECORDE`
+        : ' · RITMO DE RECORDE'
+      : '';
+    const liveDetail = `${timing}${server} · ADV ${Math.round(this.opponentAi.skill * 100)}%${chase}`;
     this.onHud({
-      score: this.score.games.player,
+      score: livePerformance,
       label: `${labels.player} × ${labels.opponent}`,
       speed01: 0,
       status: this.status,
       metricLabel: 'GAMES',
       metricValue: `${this.score.games.player} × ${this.score.games.opponent}`,
-      detail: this.lastHitInfo,
+      bestLabel: `RECORDE ${this.progress.bestScore}`,
+      rankLabel: `RANK ${rank.rank} · ${rank.xp} XP`,
+      rankProgress01: rank.progress01,
+      missionLabel: this.missionTracker.label(),
+      missionProgress01: this.missionTracker.progress01(),
+      detail: this.phase.kind === 'match-over' && this.matchSummary ? this.matchSummary : liveDetail,
       feedback: this.feedback,
     });
   }

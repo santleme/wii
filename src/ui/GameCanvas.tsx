@@ -72,9 +72,31 @@ function GameRun({ sport, onEngine, tracking, audio, onRestart }: Props & { onRe
     };
   }, [sport, onEngine, audio]);
 
+  const metricLabel = hud.metricLabel ?? (sport === 'track' ? 'RITMO' : 'MIRA');
+  const metricValue = hud.metricValue ?? (sport === 'track' ? `${Math.round(hud.speed01 * 100)}%` : hud.status.split(' · ').at(-1));
+
   return <div className="game-viewport">
     <canvas ref={canvasRef} />
-    <div className="game-hud"><div><span>{sport === 'track' ? 'SCORE' : 'PONTOS'}</span><strong>{hud.label}</strong>{(hud.combo ?? 0) > 1 && <em>COMBO {hud.combo}</em>}</div><div className="game-speed"><span>{sport === 'track' ? 'RITMO' : 'MIRA'}</span><strong>{sport === 'track' ? `${Math.round(hud.speed01 * 100)}%` : hud.status.split(' · ').at(-1)}</strong></div></div>
+    <div className="game-hud">
+      <div>
+        <span>{sport === 'track' ? 'SCORE' : 'PONTOS'}</span>
+        <strong>{hud.label}</strong>
+        {(hud.combo ?? 0) > 1 && <em>COMBO {hud.combo}</em>}
+        {hud.bestLabel && <small>{hud.bestLabel}</small>}
+      </div>
+      <div className="game-speed">
+        <span>{metricLabel}</span>
+        <strong>{metricValue}</strong>
+        {hud.rankLabel && <small>{hud.rankLabel}</small>}
+        {hud.rankProgress01 !== undefined && <div className="rank-progress"><i style={{ width: `${Math.round(hud.rankProgress01 * 100)}%` }} /></div>}
+      </div>
+    </div>
+    {hud.missionLabel && <div className="game-mission">
+      <span>MISSÃO DE HOJE</span>
+      <strong>{hud.missionLabel}</strong>
+      {hud.missionProgress01 !== undefined && <i><b style={{ width: `${Math.round(hud.missionProgress01 * 100)}%` }} /></i>}
+    </div>}
+    {hud.detail && <div className="game-detail">{hud.detail}</div>}
     {hud.feedback && <div key={hud.feedback.id} className={`game-feedback ${('kind' in hud.feedback ? hud.feedback.kind : hud.feedback.tone)}`}>
       <span>{hud.feedback.text}</span>
     </div>}
@@ -82,7 +104,9 @@ function GameRun({ sport, onEngine, tracking, audio, onRestart }: Props & { onRe
     {hud.result && <div className="game-over" role="dialog" aria-label="Fim de corrida">
       <h2>Você perdeu!</h2>
       <p>Sua melhor marca nesta corrida: <strong>{hud.result.points}</strong> pontos</p>
-      <h3>Seu ranking</h3>
+      <p>Resumo: <strong>+{hud.result.xpEarned} XP</strong> · combo máx ×{hud.result.bestCombo}</p>
+      {hud.result.achievement && <p className="run-achievement">{hud.result.achievement}</p>}
+      <h3>Melhores runs</h3>
       <ol>{hud.result.ranking.map((points, index) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: the place is the row's identity and scores may repeat
         <li key={index} className={hud.result?.position === index + 1 ? 'current' : ''}><span>{index + 1}º</span><span>{points}</span></li>

@@ -3,16 +3,19 @@
 body { margin: 0; overflow: hidden; background: #10161b; }
 button { font: inherit; cursor: pointer; }
 .stage { position: fixed; inset: 0; }
-.sport-dock, .mute-fab, .cam-pip, .game-hud span, .game-controls, .tracking-chip, .cam-empty, .pip-btn, .cam-guide, .cam-status { font-family: var(--mono); }
+.sport-dock, .mute-fab, .cam-pip, .game-hud span, .game-hud small, .game-controls, .game-detail, .game-mission, .tracking-chip, .cam-empty, .pip-btn, .cam-guide, .cam-status { font-family: var(--mono); }
 
 /* jogo em tela cheia */
 .game-viewport { position: absolute; inset: 0; }
 .game-viewport canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .game-hud { position: absolute; left: 18px; right: 18px; top: 15px; display: flex; justify-content: space-between; color: white; pointer-events: none; z-index: 3; }
-.game-hud div { display: flex; flex-direction: column; gap: 1px; }
+.game-hud > div { display: flex; flex-direction: column; gap: 1px; }
 .game-hud span { color: #d3d2c7; font-size: 8px; letter-spacing: 1px; }
 .game-hud strong { font: 700 30px var(--condensed); letter-spacing: 1px; }
 .game-hud em { color: var(--green); font: 700 14px var(--condensed); font-style: normal; letter-spacing: 1px; }
+.game-hud small { color: #d3d2c7aa; font-size: 7px; letter-spacing: .7px; }
+.rank-progress { width: 112px; height: 3px; margin: 3px 0 0 auto; overflow: hidden; border-radius: 2px; background: #ffffff1c; }
+.rank-progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--orange), #ffd36d); transition: width 240ms ease; }
 .game-banner { position: absolute; left: 0; right: 0; top: 24%; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0 16px; text-align: center; pointer-events: none; z-index: 4; text-shadow: 0 2px 8px #000c; }
 .game-banner strong { font: 700 64px var(--condensed); letter-spacing: 2px; }
 .game-banner span { font: 11px var(--mono); }
@@ -23,8 +26,15 @@ button { font: inherit; cursor: pointer; }
 .game-over li { display: flex; justify-content: space-between; padding: 3px 10px; }
 .game-over li.current { background: var(--orange); color: #16130a; font-weight: 700; }
 .game-over button { padding: 9px 16px; border: 0; border-radius: 4px; background: var(--orange); color: #16130a; font-weight: 700; }
+.game-over .run-achievement { color: var(--green); font-weight: 700; }
 .game-speed { text-align: right; }
 .game-speed strong { color: var(--orange); font-size: 20px; }
+.game-detail { position: absolute; top: 72px; left: 18px; max-width: min(560px, calc(100vw - 36px)); color: #e8e9e2cc; font-size: 8px; letter-spacing: .5px; text-shadow: 0 1px 4px #000; pointer-events: none; z-index: 3; }
+.game-mission { position: absolute; top: 72px; right: 18px; width: min(230px, calc(100vw - 36px)); color: #e8e9e2d8; text-align: right; text-shadow: 0 1px 4px #000; pointer-events: none; z-index: 3; }
+.game-mission span { display: block; color: #d3d2c7aa; font-size: 7px; letter-spacing: .8px; }
+.game-mission strong { display: block; margin-top: 2px; font-size: 8px; font-weight: 600; letter-spacing: .35px; }
+.game-mission i { display: block; width: 100%; height: 3px; margin-top: 4px; overflow: hidden; border-radius: 2px; background: #ffffff1c; }
+.game-mission i b { display: block; height: 100%; border-radius: inherit; background: var(--green); transition: width 240ms ease; }
 .game-ready { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 9px 12px; background: #10161bcc; color: #e5e6dc; font: 9px var(--mono); letter-spacing: .3px; white-space: nowrap; z-index: 3; }
 .game-ready i { width: 6px; height: 6px; background: #e8a446; border-radius: 50%; margin-right: 7px; display: inline-block; }
 .game-ready i.ready { background: var(--green); }
@@ -34,6 +44,7 @@ button { font: inherit; cursor: pointer; }
 .game-feedback { position: absolute; inset: 0; pointer-events: none; z-index: 2; display: flex; justify-content: center; align-items: flex-start; }
 .game-feedback span { margin-top: 18vh; font: 700 34px var(--condensed); letter-spacing: 1px; color: var(--green); text-shadow: 0 2px 8px #000a; opacity: 0; animation: feedback-pop .9s ease-out; }
 .game-feedback.coin span { color: #ffe066; }
+.game-feedback.milestone span { color: #ffd36d; }
 .game-feedback.hit, .game-feedback.bad { animation: feedback-flash .4s ease-out; }
 .game-feedback.hit span, .game-feedback.bad span { color: var(--red); }
 .game-feedback.neutral span { color: var(--muted); }

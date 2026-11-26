@@ -101,3 +101,28 @@ export function gameStatus(state: TennisScoreState): GameStatus {
   }
   return 'in-progress';
 }
+
+export interface MatchPerformanceInput {
+  readonly pointsWon: number;
+  readonly gamesWon: number;
+  readonly won: boolean;
+  readonly bestRally: number;
+}
+
+/**
+ * Arcade performance score for one match. Points are the base unit, games and the win matter
+ * more, and the best rally gets a small bonus so a long exchange is visible even in a defeat.
+ */
+export function matchPerformance(input: MatchPerformanceInput): number {
+  const cleanCount = (value: number) => (Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0);
+  const points = cleanCount(input.pointsWon);
+  const games = cleanCount(input.gamesWon);
+  const rally = cleanCount(input.bestRally);
+  return points * 10 + games * 40 + (input.won ? 100 : 0) + rally * 2;
+}
+
+/** Persistent XP is participation plus mastery: about a quarter of the match performance. */
+export function matchXp(performance: number): number {
+  const clean = Number.isFinite(performance) ? Math.max(0, performance) : 0;
+  return Math.max(5, Math.round(clean / 4));
+}

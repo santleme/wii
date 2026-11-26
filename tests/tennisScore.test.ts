@@ -3,6 +3,8 @@ import {
   awardPoint,
   createScore,
   gameStatus,
+  matchPerformance,
+  matchXp,
   pointLabels,
   type PlayerSide,
   type TennisScoreState,
@@ -125,5 +127,19 @@ describe('tennis score', () => {
     awardPoint(before, 'opponent');
     awardPoint(before, 'player');
     expect(JSON.parse(JSON.stringify(before))).toEqual(snapshot);
+  });
+});
+
+describe('match performance progression', () => {
+  it('explains the score as points, games, win bonus and best-rally bonus', () => {
+    expect(matchPerformance({ pointsWon: 8, gamesWon: 2, won: true, bestRally: 6 })).toBe(8 * 10 + 2 * 40 + 100 + 6 * 2);
+    expect(matchPerformance({ pointsWon: 8, gamesWon: 1, won: false, bestRally: 6 })).toBe(8 * 10 + 40 + 6 * 2);
+  });
+
+  it('sanitizes malformed inputs and keeps xp positive but proportional', () => {
+    expect(matchPerformance({ pointsWon: -3, gamesWon: Number.NaN, won: false, bestRally: 2.8 })).toBe(4);
+    expect(matchXp(0)).toBe(5);
+    expect(matchXp(100)).toBe(25);
+    expect(matchXp(Number.NaN)).toBe(5);
   });
 });

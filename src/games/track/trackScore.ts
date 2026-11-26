@@ -18,6 +18,7 @@ export interface Award { points: number; multiplier: number; perfect: boolean }
 export class TrackScore {
   private value = 0;
   private streak = 0;
+  private bestStreak = 0;
   private nextPenalty = HIT_PENALTY;
   private best = 0;
   private ended = false;
@@ -41,6 +42,11 @@ export class TrackScore {
     return this.streak;
   }
 
+  /** Highest clear streak reached in the run, preserved after a hit resets the live combo. */
+  get bestComboCount(): number {
+    return this.bestStreak;
+  }
+
   advance(dt: number, speed01: number): void {
     if (!Number.isFinite(speed01)) return;
     this.add(dt * speed01 * 50);
@@ -49,6 +55,7 @@ export class TrackScore {
   /** Each clear in a row raises the multiplier by one, up to MAX_MULTIPLIER. */
   hurdleCleared(perfect = false): Award {
     this.streak += 1;
+    this.bestStreak = Math.max(this.bestStreak, this.streak);
     const multiplier = Math.min(MAX_MULTIPLIER, this.streak);
     const points = (CLEAR_POINTS + (perfect ? PERFECT_POINTS : 0)) * multiplier;
     this.add(points);

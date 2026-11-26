@@ -15,6 +15,8 @@ export interface GameHudState {
   bestLabel?: string;
   rankLabel?: string;
   rankProgress01?: number;
+  missionLabel?: string;
+  missionProgress01?: number;
   detail?: string;
   feedback?: HudFeedback;
 }

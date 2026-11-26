@@ -42,6 +42,18 @@ describe('track score', () => {
     expect(score.combo).toBe(0);
   });
 
+  it('remembers the best combo after a hit resets the live combo', () => {
+    const score = new TrackScore();
+    score.hurdleCleared();
+    score.hurdleCleared();
+    score.hurdleCleared();
+    score.hurdleHit();
+    expect(score.combo).toBe(0);
+    expect(score.bestComboCount).toBe(3);
+    score.hurdleCleared();
+    expect(score.bestComboCount).toBe(3);
+  });
+
   it('multiplies consecutive clears up to the cap and restarts after a hit', () => {
     const score = new TrackScore();
     expect([1, 2, 3, 4, 5].map(() => score.hurdleCleared().multiplier)).toEqual([1, 2, 3, 4, 4]);
