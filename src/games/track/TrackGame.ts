@@ -5,6 +5,7 @@ import type { GameHudState as CoreGameHudState } from '../core/hud';
 import { localDateIso, MISSION_XP } from '../engagement/missions';
 import { getBrowserEngagementStores } from '../engagement/browserStores';
 import { DailyMissionSession } from '../engagement/dailyMissionSession';
+import { applyMissionReward, MissionCompletionCache } from '../engagement/missionCompletion';
 import { progressionFor, type SportProgress } from '../engagement/progression';
 import { hash32, mulberry32 } from '../engagement/seededRandom';
 import { type Feedback, awardText, SHAKE_DURATION_S, shakeOffset } from './feedback';
@@ -16,7 +17,7 @@ import { highestRankedScore, parseRanking, type RunResult, rankRun } from './ran
 import { RunGate } from './runGate';
 import { fovFor, scrollZ, timeBoost } from './scroll';
 import { type Lane, nextKind, nextLane } from './spawn';
-import { isTrackRecord, loadTrackProgress, trackMissionValue, trackRecordChase, trackRunXp } from './trackEngagement';
+import { isTrackRecord, loadTrackProgress, trackBestLabel, trackMissionValue, trackRecordBest, trackRecordChase, trackRunXp } from './trackEngagement';
 import { isPerfectJump, TrackScore } from './trackScore';
 
 export interface TrackRunResult extends RunResult {
@@ -63,6 +64,7 @@ export class TrackGame {
   private readonly progressStore = this.engagementStores.progress;
   private readonly missionDate = localDateIso(new Date());
   private readonly missionSession = new DailyMissionSession(this.engagementStores.missions, 'track', this.missionDate);
+  private readonly missionCompletion = new MissionCompletionCache();
   /** The day's obstacle sequence is repeatable; spawn timing still depends on the player's movement. */
   private readonly spawnRandom = mulberry32(hash32(`${this.missionDate}:track`));
   private progress: SportProgress;
@@ -87,7 +89,8 @@ export class TrackGame {
   private shakeTime = 0;
   private readonly gate = new RunGate();
   private result?: TrackRunResult;
-  private missionCompletion?: { missionId: string; promise: Promise<boolean> };
+  private ending = false;
+  private disposed = false;
   private status = 'Ande ou corra no lugar com a câmera, ou use ↓';
 
   constructor(canvas: HTMLCanvasElement, private readonly onHud: (state: GameHudState) => void) {
@@ -166,7 +169,7 @@ export class TrackGame {
       this.lastSprintInputAtMs = event.timestampMs;
       this.pace = applySprint(this.pace, event);
     }
-    if (this.result || this.gate.phase !== 'running') return;
+    if (this.disposed || this.result || this.ending || this.gate.phase !== 'running') return;
     if (event.type === 'jump') { this.jumpTime = JUMP_DURATION_S; this.jumpSource = 'camera'; this.status = 'Salto!'; }
     if (event.type === 'lane') { this.lane = Math.max(-1, Math.min(1, this.lane + (event.direction === 'left' ? -1 : 1))); }
   }
@@ -174,7 +177,7 @@ export class TrackGame {
   onKey(key: string): void {
     const pressed = key.toLowerCase();
     if (!['arrowleft', 'arrowright', 'arrowup', 'arrowdown', ' ', 'a', 'd', 'w', 's'].includes(pressed)) return;
-    if (this.result || this.gate.resumeByKey()) return;
+    if (this.disposed || this.result || this.ending || this.gate.resumeByKey()) return;
     if (this.gate.phase !== 'running' && pressed !== 'arrowdown' && pressed !== 's') return;
     if (key === 'ArrowLeft' || key.toLowerCase() === 'a') this.lane = Math.max(-1, this.lane - 1);
     if (key === 'ArrowRight' || key.toLowerCase() === 'd') this.lane = Math.min(1, this.lane + 1);
@@ -186,13 +189,14 @@ export class TrackGame {
   }
 
   private showFeedback(kind: Feedback['kind'], text: string): void {
+    if (this.disposed) return;
     this.feedback = { id: (this.feedback?.id ?? 0) + 1, kind, text };
     this.publishHud();
   }
 
   private update(dt: number, wallTimeMs: number): void {
     // Everything below is frozen until the gate opens: no travel, score, jump or judging.
-    if (this.result) return;
+    if (this.disposed || this.result || this.ending) return;
     this.gate.advance(dt);
     if (this.gate.phase !== 'running') return;
     this.shakeTime = Math.max(0, this.shakeTime - dt);
@@ -261,54 +265,62 @@ export class TrackGame {
   }
 
   private updateMission(): void {
-    const missionId = this.missionSession.mission.id;
-    if (this.missionCompletion?.missionId === missionId) return;
-    const current = trackMissionValue(this.missionSession.mission.metric, {
-      score: this.score.peak,
-      bestCombo: this.score.bestComboCount,
+    void this.missionCompletion.run(this.missionSession.completionKey, () => {
+      const current = trackMissionValue(this.missionSession.mission.metric, {
+        score: this.score.peak,
+        bestCombo: this.score.bestComboCount,
+      });
+      const completion = this.missionSession.tracker.update(current);
+      if (completion === false) return false;
+      let rankUp = '';
+      return applyMissionReward(
+        completion,
+        async () => {
+          const reward = await this.progressStore.addXp('track', MISSION_XP);
+          this.progress = reward.progress;
+          rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
+        },
+        () => {
+          if (!this.result?.achievement) this.showFeedback('milestone', `MISSÃO +${MISSION_XP} XP${rankUp}`);
+        },
+        () => !this.disposed,
+      );
     });
-    const completion = this.missionSession.tracker.update(current);
-    if (completion === false) return;
-    const promise = completion.then((claimed) => {
-      if (!claimed) return;
-      const reward = this.progressStore.addXp('track', MISSION_XP);
-      this.progress = reward.progress;
-      const rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
-      if (!this.result?.achievement) this.showFeedback('milestone', `MISSÃO +${MISSION_XP} XP${rankUp}`);
-      return true;
-    });
-    this.missionCompletion = { missionId, promise: promise.then((claimed) => claimed === true) };
   }
 
   /** The ranking lives in this browser only; blocked storage just means it is not remembered. */
   private endRun(): void {
+    if (this.ending) return;
+    this.ending = true;
     // A wipeout always ends the live score at zero; the peak is the run's recorded score.
     const finalScore = this.score.peak;
     const xpEarned = trackRunXp(finalScore);
-    const progressResult = this.progressStore.record('track', finalScore, xpEarned);
-    const isRecord = progressResult.isRecord && isTrackRecord(finalScore, this.legacyBestScore);
-    this.progress = progressResult.progress;
-
     const previous = readTrackRanking();
-    const achievement = progressResult.rankUp
-      ? `RANK ${progressResult.after.rank}`
-      : isRecord
-        ? 'NOVO RECORDE'
-        : undefined;
-    this.result = {
-      ...rankRun(previous, finalScore),
-      xpEarned,
-      bestCombo: this.score.bestComboCount,
-      achievement,
-    };
-    writeTrackRanking(this.result.ranking);
+    const ranked = rankRun(previous, finalScore);
+    writeTrackRanking(ranked.ranking);
 
-    if (progressResult.rankUp) this.showFeedback('milestone', `RANK ${progressResult.after.rank}!`);
-    else if (isRecord) this.showFeedback('milestone', 'NOVO RECORDE!');
-    else this.publishHud();
+    void this.progressStore.record('track', finalScore, xpEarned).then((progressResult) => {
+      const isRecord = progressResult.isRecord && isTrackRecord(finalScore, this.legacyBestScore);
+      this.progress = progressResult.progress;
+      this.result = {
+        ...ranked,
+        xpEarned,
+        bestCombo: this.score.bestComboCount,
+        achievement: progressResult.rankUp
+          ? `RANK ${progressResult.after.rank}`
+          : isRecord
+            ? 'NOVO RECORDE'
+            : undefined,
+      };
+
+      if (progressResult.rankUp) this.showFeedback('milestone', `RANK ${progressResult.after.rank}!`);
+      else if (isRecord) this.showFeedback('milestone', 'NOVO RECORDE!');
+      else this.publishHud();
+    });
   }
 
   private publishHud(): void {
+    if (this.disposed) return;
     const score = this.score.display;
     const speed = Math.round(this.shownSpeed * 100) / 100;
     const { combo } = this.score;
@@ -322,10 +334,8 @@ export class TrackGame {
       : this.gate.phase === 'paused'
         ? { title: 'PAUSADO', detail: 'Tracking perdido · volte ao quadro ou aperte uma tecla para seguir no teclado' }
         : undefined;
-    const chase = this.result ? undefined : trackRecordChase(
-      Math.max(this.progress.bestScore, this.legacyBestScore),
-      this.score.peak,
-    );
+    const recordBestScore = trackRecordBest(this.progress.bestScore, this.legacyBestScore);
+    const chase = this.result ? undefined : trackRecordChase(recordBestScore, this.score.peak);
     const detail = this.result
       ? `FINAL ${this.result.points} · COMBO MÁX ×${this.result.bestCombo} · +${this.result.xpEarned} XP${this.result.achievement ? ` · ${this.result.achievement}` : ''}`
       : chase;
@@ -352,7 +362,7 @@ export class TrackGame {
       status: this.status,
       metricLabel: 'RITMO',
       metricValue: `${Math.round(speed * 100)}%`,
-      bestLabel: `RECORDE ${this.progress.bestScore}`,
+      bestLabel: trackBestLabel(this.progress.bestScore, this.legacyBestScore),
       rankLabel: `RANK ${rank.rank} · ${rank.xp} XP`,
       rankProgress01: rank.progress01,
       missionLabel,
@@ -366,6 +376,8 @@ export class TrackGame {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     window.clearInterval(this.hudTimer);
     // Items leave the scene first so their shared resources are freed once, by their owner.
     for (const item of this.items) this.scene.remove(item.group);

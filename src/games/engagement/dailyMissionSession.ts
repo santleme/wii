@@ -1,5 +1,6 @@
 import { dailyMissionFor, type DailyMission } from './missions';
 import type { MissionStore } from './missionStore';
+import { missionCompletionKey } from './missionCompletion';
 import { MissionTracker } from './missionTracker';
 import type { SportKey } from './progression';
 
@@ -21,6 +22,10 @@ export class DailyMissionSession {
 
   get mission(): DailyMission {
     return this.currentMission;
+  }
+
+  get completionKey(): string {
+    return missionCompletionKey(this.currentDateIso, this.sport, this.currentMission.id);
   }
 
   get tracker(): MissionTracker {

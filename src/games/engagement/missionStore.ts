@@ -36,19 +36,17 @@ export class MissionStore {
   async complete(dateIso: string, sport: SportKey, missionId: string): Promise<boolean> {
     if (!this.storage || this.storageFailed) return this.completeInMemory(dateIso, sport, missionId);
 
-    if (!this.completionLock) {
-      this.enableMemoryFallback();
-      return this.completeInMemory(dateIso, sport, missionId);
-    }
+    // Persist sequential claims without Web Locks; cross-tab races cannot be prevented here.
+    if (!this.completionLock) return this.completeWithCurrentData(dateIso, sport, missionId);
 
     try {
       return await this.completionLock.request(COMPLETION_LOCK_NAME, () => (
         this.completeWithCurrentData(dateIso, sport, missionId)
       ));
     } catch {
-      // Without the origin-wide lock, keep gameplay working with this document's memory copy.
-      this.enableMemoryFallback();
-      return this.completeInMemory(dateIso, sport, missionId);
+      // Keep completion durable if Web Locks fail, though this synchronous fallback cannot
+      // coordinate competing browsing contexts.
+      return this.completeWithCurrentData(dateIso, sport, missionId);
     }
   }
 
@@ -111,11 +109,6 @@ export class MissionStore {
     }
   }
 
-  private enableMemoryFallback(): void {
-    if (this.storageFailed) return;
-    this.memory = this.read();
-    this.storageFailed = true;
-  }
 }
 
 export function createBrowserMissionStore(): MissionStore {
@@ -133,7 +126,7 @@ export function createBrowserMissionStore(): MissionStore {
         request: (name, callback) => lockManager.request(name, () => callback()),
       };
     }
-  } catch { /* unavailable Web Locks use the same per-document memory fallback */ }
+  } catch { /* unavailable Web Locks use the synchronous durable fallback in MissionStore */ }
 
   return new MissionStore(storage, completionLock);
 }

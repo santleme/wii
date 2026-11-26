@@ -28,6 +28,10 @@ export function trackRecordBest(progressBestScore: number, legacyBestScore: numb
   return Math.max(cleanScore(progressBestScore), cleanScore(legacyBestScore));
 }
 
+export function trackBestLabel(progressBestScore: number, legacyBestScore: number): string {
+  return `RECORDE ${trackRecordBest(progressBestScore, legacyBestScore)}`;
+}
+
 export function isTrackRecord(score: number, recordBestScore: number): boolean {
   return cleanScore(score) > cleanScore(recordBestScore);
 }

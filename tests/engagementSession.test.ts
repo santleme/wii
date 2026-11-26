@@ -22,7 +22,7 @@ describe('engagement session lifetime', () => {
     vi.stubGlobal('window', { get localStorage() { return blockedStorage; } });
 
     const firstEngineStores = getBrowserEngagementStores();
-    firstEngineStores.progress.record('track', 800, 80);
+    await firstEngineStores.progress.record('track', 800, 80);
     await firstEngineStores.missions.complete('2026-11-25', 'track', 'mission-1');
 
     const restartedEngineStores = getBrowserEngagementStores();

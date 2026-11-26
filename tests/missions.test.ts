@@ -70,13 +70,15 @@ describe('mission completion storage', () => {
     expect(store.isCompleted('2026-11-25', 'track', 'mission')).toBe(false);
   });
 
-  it('uses a per-document memory fallback when origin-wide locks are unavailable', async () => {
+  it('persists sequential completion when origin-wide locks are unavailable', async () => {
     const backing = new MemoryStorage();
     const store = new MissionStore(backing);
 
     await expect(store.complete('2026-11-25', 'track', 'mission')).resolves.toBe(true);
 
     expect(store.isCompleted('2026-11-25', 'track', 'mission')).toBe(true);
-    expect(new MissionStore(backing).isCompleted('2026-11-25', 'track', 'mission')).toBe(false);
+    const reloaded = new MissionStore(backing);
+    expect(reloaded.isCompleted('2026-11-25', 'track', 'mission')).toBe(true);
+    await expect(reloaded.complete('2026-11-25', 'track', 'mission')).resolves.toBe(false);
   });
 });

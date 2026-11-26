@@ -12,6 +12,7 @@ import {
 import { localDateIso, MISSION_XP } from '../engagement/missions';
 import { getBrowserEngagementStores } from '../engagement/browserStores';
 import { DailyMissionSession } from '../engagement/dailyMissionSession';
+import { applyMissionReward, MissionCompletionCache } from '../engagement/missionCompletion';
 import { progressionFor, type ProgressRecordResult } from '../engagement/progression';
 import { advanceBall, createBall, solveOutgoing, timeAtPlane, type BallState } from './ballistics';
 import { adjudicateContact, type ContactOutcome } from './contactAdjudicator';
@@ -113,7 +114,8 @@ export class TennisGame {
   private bestRally = 0;
   private matchRecorded = false;
   private matchSummary = '';
-  private missionCompletion?: { missionId: string; promise: Promise<boolean> };
+  private readonly missionCompletion = new MissionCompletionCache();
+  private disposed = false;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -186,6 +188,7 @@ export class TennisGame {
   // ---------------------------------------------------------------- input
 
   onAction(event: SportActionEvent): void {
+    if (this.disposed) return;
     if (event.type === 'swing-start') {
       this.swingAnimT = 0;
       return;
@@ -201,6 +204,7 @@ export class TennisGame {
   }
 
   onKey(key: string): void {
+    if (this.disposed) return;
     if (key !== ' ' && key !== 'Spacebar') return;
     this.swingAnimT = 0;
     this.resolveSwing({
@@ -337,6 +341,7 @@ export class TennisGame {
   // ---------------------------------------------------------------- update
 
   private update(fixedDt: number, now: number, wallNow: number): void {
+    if (this.disposed) return;
     this.notePauseBoundary(wallNow);
     if (now < this.lastSimulationTimeMs) {
       // An input can land between fixed steps and advance the ball beyond this queued step.
@@ -530,9 +535,13 @@ export class TennisGame {
       // A mission completed by the last point is acknowledged first; the match achievement
       // then takes priority in the single feedback slot.
       const missionCompletion = this.updateMission();
-      const finishMatchFeedback = (missionJustCompleted: boolean) => {
-        if (completion?.record.rankUp) this.setFeedback(`RANK ${completion.record.after.rank}!`, 'good');
-        else if (completion?.record.isRecord) this.setFeedback('NOVO RECORDE!', 'good');
+      const finishMatchFeedback = (
+        matchCompletion: Awaited<ReturnType<TennisGame['finishMatch']>>,
+        missionJustCompleted: boolean,
+      ) => {
+        if (this.disposed) return;
+        if (matchCompletion?.record.rankUp) this.setFeedback(`RANK ${matchCompletion.record.after.rank}!`, 'good');
+        else if (matchCompletion?.record.isRecord) this.setFeedback('NOVO RECORDE!', 'good');
         else if (!missionJustCompleted) {
           this.setFeedback(
             result.matchWonBy === 'player' ? 'VITÓRIA!' : 'FIM DE PARTIDA',
@@ -541,8 +550,10 @@ export class TennisGame {
           this.audio?.milestone();
         }
       };
-      if (missionCompletion === false) finishMatchFeedback(false);
-      else void missionCompletion.then(finishMatchFeedback);
+      const missionClaim = missionCompletion === false ? Promise.resolve(false) : missionCompletion;
+      void Promise.all([completion ?? Promise.resolve(undefined), missionClaim]).then(
+        ([matchCompletion, missionJustCompleted]) => finishMatchFeedback(matchCompletion, missionJustCompleted),
+      );
     } else if (result.gameWonBy) {
       this.phase = { kind: 'point-over', resumeAtMs: now + POINT_PAUSE_S * 1500 };
       this.status = `${result.gameWonBy === 'player' ? 'GAME SEU!' : 'Game do adversário'} · rally ${rally}`;
@@ -575,24 +586,27 @@ export class TennisGame {
   }
 
   private updateMission(): false | Promise<boolean> {
-    const missionId = this.missionSession.mission.id;
-    if (this.missionCompletion?.missionId === missionId) return this.missionCompletion.promise;
-    const completion = this.missionSession.tracker.update(this.currentMissionValue());
-    if (completion === false) return false;
-    const promise = completion.then((claimed) => {
-      if (!claimed) return false;
-      const reward = this.progressStore.addXp('tennis', MISSION_XP);
-      this.progress = reward.progress;
-      const rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
-      this.setFeedback(`MISSÃO +${MISSION_XP} XP${rankUp}`, 'good');
-      this.audio?.milestone();
-      return true;
+    return this.missionCompletion.run(this.missionSession.completionKey, () => {
+      const completion = this.missionSession.tracker.update(this.currentMissionValue());
+      if (completion === false) return false;
+      let rankUp = '';
+      return applyMissionReward(
+        completion,
+        async () => {
+          const reward = await this.progressStore.addXp('tennis', MISSION_XP);
+          this.progress = reward.progress;
+          rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
+        },
+        () => {
+          this.setFeedback(`MISSÃO +${MISSION_XP} XP${rankUp}`, 'good');
+          this.audio?.milestone();
+        },
+        () => !this.disposed,
+      );
     });
-    this.missionCompletion = { missionId, promise };
-    return promise;
   }
 
-  private finishMatch(winner: PlayerSide): { performanceScore: number; xpEarned: number; record: ProgressRecordResult } | undefined {
+  private finishMatch(winner: PlayerSide): Promise<{ performanceScore: number; xpEarned: number; record: ProgressRecordResult } | undefined> | undefined {
     if (this.matchRecorded) return undefined;
     this.matchRecorded = true;
     const performanceScore = matchPerformance({
@@ -602,11 +616,12 @@ export class TennisGame {
       bestRally: this.bestRally,
     });
     const xpEarned = matchXp(performanceScore);
-    const record = this.progressStore.record('tennis', performanceScore, xpEarned);
-    this.progress = record.progress;
-    const achievement = record.rankUp ? ` · RANK ${record.after.rank}` : record.isRecord ? ' · NOVO RECORDE' : '';
-    this.matchSummary = `DESEMPENHO ${performanceScore} · PONTOS ${this.pointsWon}×${this.pointsLost} · MELHOR RALLY ${this.bestRally} · +${xpEarned} XP${achievement}`;
-    return { performanceScore, xpEarned, record };
+    return this.progressStore.record('tennis', performanceScore, xpEarned).then((record) => {
+      this.progress = record.progress;
+      const achievement = record.rankUp ? ` · RANK ${record.after.rank}` : record.isRecord ? ' · NOVO RECORDE' : '';
+      this.matchSummary = `DESEMPENHO ${performanceScore} · PONTOS ${this.pointsWon}×${this.pointsLost} · MELHOR RALLY ${this.bestRally} · +${xpEarned} XP${achievement}`;
+      return { performanceScore, xpEarned, record };
+    });
   }
 
   private resetMatch(now: number): void {
@@ -626,6 +641,7 @@ export class TennisGame {
     this.tape = [];
     this.opponentHitPlan = null;
     this.missionSession.startAttempt(localDateIso(new Date()));
+    this.missionCompletion.clear();
     this.startPoint(now);
   }
 
@@ -676,11 +692,13 @@ export class TennisGame {
   // ---------------------------------------------------------------- hud & lifecycle
 
   private setFeedback(text: string, tone: 'good' | 'bad' | 'neutral'): void {
+    if (this.disposed) return;
     this.feedbackCounter += 1;
     this.feedback = { id: this.feedbackCounter, text, tone };
   }
 
   private publishHud(): void {
+    if (this.disposed) return;
     const labels = pointLabels(this.score);
     const livePerformance = this.livePerformanceScore();
     const rank = progressionFor(this.progress.xp);
@@ -711,6 +729,8 @@ export class TennisGame {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     window.clearInterval(this.hudTimer);
     this.loop.dispose();
   }

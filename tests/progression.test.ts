@@ -1,10 +1,26 @@
 import { describe, expect, it } from 'vitest';
 import { addSportXp, emptyProgress, progressionFor, recordSportResult } from '../src/games/engagement/progression';
 import { ProgressStore, type KeyValueStorage } from '../src/games/engagement/progressStore';
+import { SerialMissionCompletionLock } from './helpers/missionCompletionLock';
 
 class MemoryStorage implements KeyValueStorage {
   private readonly values = new Map<string, string>();
   getItem(key: string): string | null { return this.values.get(key) ?? null; }
+  setItem(key: string, value: string): void { this.values.set(key, value); }
+}
+
+class InterleavingStorage implements KeyValueStorage {
+  private readonly values = new Map<string, string>();
+  onNextRead?: () => void;
+
+  getItem(key: string): string | null {
+    const observed = this.values.get(key) ?? null;
+    const hook = this.onNextRead;
+    this.onNextRead = undefined;
+    hook?.();
+    return observed;
+  }
+
   setItem(key: string, value: string): void { this.values.set(key, value); }
 }
 
@@ -46,22 +62,23 @@ describe('sport progression', () => {
 });
 
 describe('progress storage', () => {
-  it('persists independent sport progress in the backing storage', () => {
+  it('persists independent sport progress in the backing storage', async () => {
     const backing = new MemoryStorage();
-    const store = new ProgressStore(backing);
-    store.record('track', 800, 80);
-    store.record('tennis', 3, 120);
+    const lock = new SerialMissionCompletionLock();
+    const store = new ProgressStore(backing, lock);
+    await store.record('track', 800, 80);
+    await store.record('tennis', 3, 120);
     const reloaded = new ProgressStore(backing);
     expect(reloaded.load('track')).toEqual({ bestScore: 800, plays: 1, xp: 80 });
     expect(reloaded.load('tennis')).toEqual({ bestScore: 3, plays: 1, xp: 120 });
   });
 
 
-  it('persists xp-only rewards through the backing storage', () => {
+  it('persists xp-only rewards through the backing storage', async () => {
     const backing = new MemoryStorage();
-    const store = new ProgressStore(backing);
-    store.record('track', 800, 80);
-    store.addXp('track', 25);
+    const store = new ProgressStore(backing, new SerialMissionCompletionLock());
+    await store.record('track', 800, 80);
+    await store.addXp('track', 25);
     const reloaded = new ProgressStore(backing);
     expect(reloaded.load('track')).toEqual({ bestScore: 800, plays: 1, xp: 105 });
   });
@@ -75,20 +92,40 @@ describe('progress storage', () => {
 
 
 
-  it('keeps recording in memory when the backing storage rejects writes', () => {
+  it('keeps recording in memory when the backing storage rejects writes', async () => {
     const failing: KeyValueStorage = {
       getItem: () => null,
       setItem: () => { throw new Error('quota'); },
     };
-    const store = new ProgressStore(failing);
-    store.record('track', 100, 10);
-    store.record('track', 250, 20);
+    const store = new ProgressStore(failing, new SerialMissionCompletionLock());
+    await store.record('track', 100, 10);
+    await store.record('track', 250, 20);
     expect(store.load('track')).toEqual({ bestScore: 250, plays: 2, xp: 30 });
   });
-  it('keeps in-memory progress when no storage is available', () => {
+  it('keeps in-memory progress when no storage is available', async () => {
     const store = new ProgressStore();
-    store.record('track', 100, 10);
+    await store.record('track', 100, 10);
     expect(store.load('track')).toEqual({ bestScore: 100, plays: 1, xp: 10 });
+  });
+
+  it('keeps mission XP and a concurrent match record in the same snapshot', async () => {
+    const backing = new InterleavingStorage();
+    const lock = new SerialMissionCompletionLock();
+    const missionStore = new ProgressStore(backing, lock);
+    const matchStore = new ProgressStore(backing, lock);
+    backing.setItem('wii-web-sports.progress.v1', JSON.stringify({
+      version: 1,
+      sports: { tennis: { bestScore: 100, plays: 1, xp: 100 } },
+    }));
+    let matchRecord: ReturnType<typeof matchStore.record> | undefined;
+    backing.onNextRead = () => { matchRecord = matchStore.record('tennis', 500, 50); };
+
+    const missionReward = await missionStore.addXp('tennis', 25);
+    expect(matchRecord).toBeDefined();
+    await matchRecord;
+
+    expect(missionReward.progress.xp).toBe(125);
+    expect(missionStore.load('tennis')).toEqual({ bestScore: 500, plays: 2, xp: 175 });
   });
 
 });

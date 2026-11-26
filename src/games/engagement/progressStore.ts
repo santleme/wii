@@ -15,6 +15,11 @@ export interface KeyValueStorage {
 }
 
 const STORAGE_KEY = 'wii-web-sports.progress.v1';
+const MUTATION_LOCK_NAME = 'wii-web-sports.progress-mutation.v1';
+
+export interface ProgressMutationLock {
+  request<T>(name: string, callback: () => T): Promise<T>;
+}
 
 type ProgressData = {
   version: 1;
@@ -26,20 +31,37 @@ function emptyData(): ProgressData {
 }
 
 /**
- * Small local progression repository. It degrades to in-memory progress when storage is absent
- * or blocked, so gameplay never depends on persistence being available.
+ * Small local progression repository. Mutations use an origin lock when available and degrade
+ * to synchronous storage or document memory when coordination or persistence is unavailable.
  */
 export class ProgressStore {
   private memory = emptyData();
   private storageFailed = false;
 
-  constructor(private readonly storage?: KeyValueStorage) {}
+  constructor(
+    private readonly storage?: KeyValueStorage,
+    private readonly mutationLock?: ProgressMutationLock,
+  ) {}
 
   load(sport: SportKey): SportProgress {
     return normalizeProgress(this.read().sports[sport] ?? emptyProgress());
   }
 
-  record(sport: SportKey, score: number, xpEarned: number): ProgressRecordResult {
+  async record(sport: SportKey, score: number, xpEarned: number): Promise<ProgressRecordResult> {
+    if (!this.storage || this.storageFailed || !this.mutationLock) {
+      return this.recordWithCurrentData(sport, score, xpEarned);
+    }
+
+    try {
+      return await this.mutationLock.request(MUTATION_LOCK_NAME, () => (
+        this.recordWithCurrentData(sport, score, xpEarned)
+      ));
+    } catch {
+      return this.recordWithCurrentData(sport, score, xpEarned);
+    }
+  }
+
+  private recordWithCurrentData(sport: SportKey, score: number, xpEarned: number): ProgressRecordResult {
     const data = this.read();
     const result = recordSportResult(normalizeProgress(data.sports[sport] ?? emptyProgress()), score, xpEarned);
     const next: ProgressData = { version: 1, sports: { ...data.sports, [sport]: result.progress } };
@@ -48,7 +70,21 @@ export class ProgressStore {
   }
 
 
-  addXp(sport: SportKey, xpEarned: number): XpRecordResult {
+  async addXp(sport: SportKey, xpEarned: number): Promise<XpRecordResult> {
+    if (!this.storage || this.storageFailed || !this.mutationLock) {
+      return this.addXpWithCurrentData(sport, xpEarned);
+    }
+
+    try {
+      return await this.mutationLock.request(MUTATION_LOCK_NAME, () => (
+        this.addXpWithCurrentData(sport, xpEarned)
+      ));
+    } catch {
+      return this.addXpWithCurrentData(sport, xpEarned);
+    }
+  }
+
+  private addXpWithCurrentData(sport: SportKey, xpEarned: number): XpRecordResult {
     const data = this.read();
     const result = addSportXp(normalizeProgress(data.sports[sport] ?? emptyProgress()), xpEarned);
     const next: ProgressData = { version: 1, sports: { ...data.sports, [sport]: result.progress } };
@@ -91,9 +127,21 @@ export class ProgressStore {
 }
 
 export function createBrowserProgressStore(): ProgressStore {
+  let storage: KeyValueStorage | undefined;
+  let mutationLock: ProgressMutationLock | undefined;
+
   try {
-    return new ProgressStore(window.localStorage);
-  } catch {
-    return new ProgressStore();
-  }
+    storage = window.localStorage;
+  } catch { /* blocked storage keeps progress in this document's memory */ }
+
+  try {
+    const lockManager = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    if (lockManager) {
+      mutationLock = {
+        request: (name, callback) => lockManager.request(name, () => callback()),
+      };
+    }
+  } catch { /* unavailable Web Locks use the synchronous durable fallback */ }
+
+  return new ProgressStore(storage, mutationLock);
 }

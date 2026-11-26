@@ -75,7 +75,7 @@ describe('mission tracker', () => {
     const progressStore = new ProgressStore(progressBacking);
     const lock = new SerialMissionCompletionLock();
     const awardIfCompleted = async (tracker: MissionTracker, value: number) => {
-      if (await tracker.update(value)) progressStore.addXp('track', MISSION_XP);
+      if (await tracker.update(value)) await progressStore.addXp('track', MISSION_XP);
     };
 
     await awardIfCompleted(new MissionTracker(new MissionStore(missionBacking, lock), '2026-11-25', mission), 100);
@@ -97,8 +97,8 @@ describe('mission tracker', () => {
     expect(typeof firstClaim).not.toBe('boolean');
     const firstAwarded = await firstClaim;
     const secondAwarded = await secondClaim;
-    if (firstAwarded) progressStore.addXp('track', MISSION_XP);
-    if (secondAwarded) progressStore.addXp('track', MISSION_XP);
+    if (firstAwarded) await progressStore.addXp('track', MISSION_XP);
+    if (secondAwarded) await progressStore.addXp('track', MISSION_XP);
 
     expect(progressStore.load('track').xp).toBe(MISSION_XP);
     expect([firstAwarded, secondAwarded]).toEqual([true, false]);

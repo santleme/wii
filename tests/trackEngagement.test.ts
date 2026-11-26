@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTrackRecord, loadTrackProgress, trackMissionValue, trackRecordBest, trackRecordChase, trackRunXp } from '../src/games/track/trackEngagement';
+import { isTrackRecord, loadTrackProgress, trackBestLabel, trackMissionValue, trackRecordBest, trackRecordChase, trackRunXp } from '../src/games/track/trackEngagement';
 import { ProgressStore, type KeyValueStorage } from '../src/games/engagement/progressStore';
 
 class InterleavingStorage implements KeyValueStorage {
@@ -62,6 +62,7 @@ describe('track engagement metrics', () => {
     expect(trackRecordChase(recordBestScore, 300)).toBe('FALTAM 901 P/ RECORDE');
     expect(isTrackRecord(300, recordBestScore)).toBe(false);
     expect(isTrackRecord(1201, recordBestScore)).toBe(true);
+    expect(trackBestLabel(300, 1200)).toBe('RECORDE 1200');
   });
 
   it('does not overwrite a newer Tennis snapshot while loading the legacy Track floor', () => {
