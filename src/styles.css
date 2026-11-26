@@ -3,7 +3,7 @@
 body { margin: 0; overflow: hidden; background: #10161b; }
 button { font: inherit; cursor: pointer; }
 .stage { position: fixed; inset: 0; }
-.sport-dock, .mute-fab, .cam-pip, .game-hud span, .game-hud small, .game-controls, .game-detail, .game-mission, .tracking-chip, .cam-empty, .pip-btn, .cam-guide, .cam-status { font-family: var(--mono); }
+.sport-dock, .mute-fab, .cam-pip, .game-hud span, .game-hud small, .game-controls, .game-detail, .game-mission, .tracking-chip, .cam-empty, .pip-btn, .cam-status { font-family: var(--mono); }
 
 /* jogo em tela cheia */
 .game-viewport { position: absolute; inset: 0; }
@@ -90,14 +90,10 @@ button { font: inherit; cursor: pointer; }
   .game-mission { align-self: flex-end; flex-basis: auto; width: min(230px, 100%); }
 }
 
-.cam-guide { position: absolute; z-index: 4; left: 6px; right: 6px; bottom: 6px; padding: 5px 6px; background: #10161be0; color: #f7f0dc; font-size: 7.5px; line-height: 1.4; text-align: center; border-radius: 2px; }
-.cam-guide.ok { background: #1f6f43e6; }
-
 /* tela cheia: a imagem inteira, sem cortes */
 .cam-pip.expanded { inset: 14px; width: auto; z-index: 20; display: flex; flex-direction: column; }
 .expanded .cam-feed { flex: 1; min-height: 0; aspect-ratio: auto; }
 .expanded .cam-feed video, .expanded .cam-feed canvas { object-fit: contain; }
-.expanded .cam-guide { top: 10px; bottom: auto; left: 130px; right: 130px; font-size: 18px; padding: 12px 16px; }
 .expanded .tracking-chip { font-size: 11px; }
 .expanded .cam-bar { justify-content: center; }
 .expanded .pip-btn { flex: 0 0 auto; padding: 10px 18px; font-size: 11px; }

@@ -12,7 +12,7 @@
 
 - Node.js 24 LTS e npm 11 ou compatível.
 - Navegador desktop moderno (Chrome, Edge ou Firefox) com câmera e WebGL 2; publicação e uso da câmera exigem HTTPS (localhost funciona em desenvolvimento).
-- Câmera enquadrando o corpo inteiro para corrida e salto. O Tênis funciona com enquadramento mais próximo.
+- Câmera enquadrando cabeça e torso até o quadril. Pernas e pés são opcionais; para tênis, pelo menos uma mão visível melhora a referência da raquetada.
 
 ## Desenvolvimento
 
@@ -21,7 +21,7 @@ npm ci
 npm run dev
 ```
 
-O servidor local imprime a URL de desenvolvimento. A primeira ação **Ativar câmera** solicita permissão; a câmera abre em tela grande e calibra sozinha quando você fica parado e enquadrado (cerca de quatro segundos). A mão da raquete é detectada pelo movimento. Se a câmera não estiver disponível, setas e espaço continuam funcionando.
+O servidor local imprime a URL de desenvolvimento. A primeira ação **Ativar câmera** solicita permissão. Não há etapa manual de calibração: corrida e salto entram assim que o torso é rastreado, enquanto escala corporal, postura neutra e referências das mãos convergem continuamente em segundo plano conforme você joga. A mão da raquete é detectada pelo movimento. Se a câmera não estiver disponível, setas e espaço continuam funcionando.
 
 ```bash
 npm test
@@ -34,7 +34,7 @@ O build copia a variante module do WASM do MediaPipe fixado no lockfile para `pu
 
 ## Arquitetura
 
-- `src/cv/`: Worker do Pose Landmarker (variante WASM module, `useModule`), cliente de captura com um frame em trânsito que mantém o worker quente entre liga/desliga e carrega os ativos em paralelo à permissão de câmera; calibração.
+- `src/cv/`: Worker do Pose Landmarker (variante WASM module, `useModule`), cliente de captura com um frame em trânsito que mantém o worker quente entre liga/desliga e carrega os ativos em paralelo à permissão de câmera; auto-calibração online contínua.
 - `src/kinematics/`: filtro 1-Euro, histerese, gating de confiança e detectores puros.
 - `src/games/`: loop fixo Three.js e cenas arcade desacopladas da câmera.
 - `src/ui/`: canvas do jogo em tela cheia, seletor de modalidade e PiP da câmera.

@@ -127,7 +127,7 @@ export function poseWithWorldTorso(
 
 export function calibration(): CalibrationProfile {
   return {
-    version: 2, completedAtMs: 3000,
+    version: 3, completedAtMs: 3000,
     world: { shoulderWidth: 0.4, leanUp0: { x: 0, y: -1, z: 0 }, torsoLeanRad0: 0, readyWristLocal: { left: { x: 0, y: -1.25, z: 0 }, right: { x: 0, y: -1.25, z: 0 } } },
     quality: { validFrameRatio: 1, medianConfidence: 0.95 },
   };

@@ -148,4 +148,19 @@ describe('pipeline swing-start and enriched events', () => {
     ));
     expect(events.filter((event) => event.type === 'swing-start' || event.type === 'swing')).toHaveLength(0);
   });
+
+  it('rearms and confirms the first swing at a steady 133 ms pose cadence', () => {
+    const pipeline = new ActionPipeline();
+    const profile = calibration();
+    for (const time of [0, 133, 266]) pipeline.update(pose(time));
+    for (const time of [399, 532, 665, 798, 931, 1064]) pipeline.update(pose(time), profile);
+
+    const events = [
+      pose(1197, { wristLateral: -0.3 }),
+      pose(1330, { wristLateral: 0.2 }),
+    ].flatMap((frame) => pipeline.update(frame, profile).events);
+
+    expect(events.some((event) => event.type === 'swing-start')).toBe(true);
+    expect(events.some((event) => event.type === 'swing')).toBe(true);
+  });
 });

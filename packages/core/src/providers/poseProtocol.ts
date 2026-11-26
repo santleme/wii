@@ -2,7 +2,7 @@ import type { Delegate, Hand, Point3, TrackingState } from '../types';
 
 export type { Delegate, Hand, Point3, PoseSnapshot, TrackingState } from '../types';
 export interface CalibrationProfile {
-  version: 2;
+  version: 3;
   completedAtMs: number;
   world: {
     shoulderWidth: number;
@@ -13,10 +13,15 @@ export interface CalibrationProfile {
     leanUp0: Point3;
     /** Lateral trunk lean of the neutral calibration pose; runtime lean is reported as the delta from it. */
     torsoLeanRad0: number;
-    /** Each wrist relative to its shoulder; absent when a usable wrist reference was not calibrated. */
-    readyWristLocal?: Record<Hand, Point3>;
+    /** Each wrist relative to its own shoulder; each hand has an independent optional reference. */
+    readyWristLocal?: Partial<Record<Hand, Point3>>;
   };
   quality: { validFrameRatio: number; medianConfidence: number };
+  /**
+   * Per-control convergence, when the profile comes from an online estimator. Missing means
+   * a traditionally completed profile, so consumers treat every control as ready.
+   */
+  readiness?: { scale01: number; neutral01: number };
 }
 
 export interface WorkerInit {
@@ -96,8 +101,8 @@ interface ActionBase {
   confidence: number;
   /**
    * 'tracked' marks an action measured on a tracked pose; any other state marks a control event emitted because
-   * the action's landmarks could not be confirmed — the sprint stop is 'degraded'/'lost' when tracking decays,
-   * and 'lost' when calibration is absent (e.g. after a dominant-hand change) or capture stops.
+   * the action's landmarks could not be confirmed — the sprint stop is 'degraded'/'lost' when tracking decays
+   * or capture stops. Calibration absence gates calibration-dependent controls, never torso cadence itself.
    */
   trackingState: TrackingState;
   /** 'cv' events come from the pose pipeline; 'keyboard' events are injected controls, not pose measurements. */

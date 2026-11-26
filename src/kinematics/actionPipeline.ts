@@ -30,15 +30,6 @@ export class ActionPipeline {
     const start = performance.now();
     const body = this.bodyGate.evaluate(snapshot);
     const current = { ...snapshot, trackingState: body.state, bodyConfidence: body.confidence };
-    if (!calibration) {
-      const stopped = this.stopSprint(snapshot.timestampMs, body.confidence, 'lost');
-      this.resetDetectors();
-      return {
-        snapshot: current, events: stopped,
-        controls: { sprintSpeed01: 0, cadenceSpm: 0, trackingState: 'lost' },
-        kinematicsMs: performance.now() - start,
-      };
-    }
     const events: SportActionEvent[] = [];
     let controls: ContinuousControls = { sprintSpeed01: 0, cadenceSpm: 0, trackingState: 'lost' };
 
@@ -64,15 +55,20 @@ export class ActionPipeline {
     }
 
     const laneTracking = this.laneGate.evaluate(snapshot);
-    if (laneTracking.state === 'tracked') {
+    const laneReady = calibration !== undefined && (calibration.readiness?.neutral01 ?? 1) >= 0.65;
+    if (!laneReady) this.lean.reset();
+    else if (laneTracking.state === 'tracked') {
       const lane = this.lean.update(current, calibration);
       if (lane) events.push({ ...this.eventBase(snapshot, laneTracking.confidence), id: this.nextId++, type: 'lane', direction: lane });
     } else if (laneTracking.state === 'lost') this.lean.reset();
 
+    const swingScaleReady = calibration !== undefined && (calibration.readiness?.scale01 ?? 1) >= 0.5;
+    if (!swingScaleReady) this.heldSwing = undefined;
     const results = this.swings.map(({ wrist, gate, detector, hand }) => {
       const tracking = gate.evaluate(snapshot, [11, 12, 23, 24, wrist], 'world');
-      if (tracking.state === 'lost') detector.reset();
-      const output = tracking.state === 'tracked' ? detector.update(current, calibration) : undefined;
+      if (tracking.state === 'lost' || !swingScaleReady) detector.reset();
+      else if (tracking.state === 'degraded') detector.interruptRearm();
+      const output = calibration && swingScaleReady && tracking.state === 'tracked' ? detector.update(current, calibration) : undefined;
       // The onset bypasses arbitration and the refractory on purpose: it is the real-time,
       // unconfirmed channel — the game's cue to start the stroke animation now, not proof of a hit.
       if (output?.kind === 'onset') {

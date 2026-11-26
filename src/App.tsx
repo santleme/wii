@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CalibrationProfile, SportActionEvent } from './cv/protocol';
-import { AutoCalibrator, type CalibrationPhase } from './cv/autoCalibrator';
+import { AdaptiveCalibrator } from './cv/adaptiveCalibrator';
 import { observeEarlyRejection } from './cv/observeEarlyRejection';
 import { PoseClient, type PoseClientCallbacks } from './cv/poseClient';
 import { ActionPipeline } from './kinematics/actionPipeline';
@@ -40,8 +40,6 @@ export default function App() {
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraStatus, setCameraStatus] = useState('Permissão da câmera ainda não solicitada');
   const [tracking, setTracking] = useState('SEM POSE');
-  const [calibrationPhase, setCalibrationPhase] = useState<CalibrationPhase>('framing');
-  const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [muted, setMuted] = useState(readMutedPreference);
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -50,7 +48,7 @@ export default function App() {
   const engineRef = useRef<GameEngineHandle | null>(null);
   const pipelineRef = useRef(new ActionPipeline());
   const contextRef = useRef(new ContextClassifier());
-  const calibratorRef = useRef(new AutoCalibrator());
+  const calibratorRef = useRef(new AdaptiveCalibrator());
   const sportRef = useRef(sport);
   sportRef.current = sport;
   const profileRef = useRef<CalibrationProfile | undefined>(undefined);
@@ -83,11 +81,9 @@ export default function App() {
     }
   }, []);
 
-  const recalibrate = useCallback(() => {
+  const resetCalibration = useCallback(() => {
     profileRef.current = undefined;
     calibratorRef.current.reset();
-    setCalibrationPhase('framing');
-    setCalibrationProgress(0);
   }, []);
 
   const stopCamera = useCallback(() => {
@@ -101,9 +97,9 @@ export default function App() {
     setCameraStatus('Câmera desligada');
     for (const event of pipelineRef.current.reset()) dispatchEvent(event);
     contextRef.current.reset();
-    recalibrate();
+    resetCalibration();
     drawPose(overlayRef.current, videoRef.current);
-  }, [dispatchEvent, recalibrate]);
+  }, [dispatchEvent, resetCalibration]);
 
   const startCamera = useCallback(async () => {
     stopCamera();
@@ -117,15 +113,11 @@ export default function App() {
       },
       onPose: (raw) => {
         if (stale()) return;
+        // Implicit calibration: every observed frame is evidence. The current profile is a
+        // continuously improving estimate, never a mode the player has to enter or watch.
+        profileRef.current = calibratorRef.current.update(raw) ?? profileRef.current;
         const result = pipelineRef.current.update(raw, profileRef.current);
         const current = result.snapshot;
-        if (!profileRef.current) {
-          const step = calibratorRef.current.update(current, { needsWrists: sportRef.current === 'tennis' });
-          profileRef.current = step.profile;
-          setCalibrationPhase(step.phase);
-          setCalibrationProgress(step.progress);
-          if (step.profile) setCameraStatus('Calibração aprovada · postura neutra salva');
-        }
         const decision = contextRef.current.update(current, profileRef.current);
         const activity = decision.confidence01 > 0.4 ? ` · ${ACTIVITY_LABEL[decision.activity]}` : '';
         setTracking(current.trackingState === 'tracked' ? `TRACKING${activity}` : current.trackingState === 'lost' ? 'SEM POSE' : 'PROCURANDO');
@@ -190,19 +182,17 @@ export default function App() {
         <button type="button" className={sport === 'track' ? 'active' : ''} onClick={() => setSport('track')}>01 · CORRIDA</button>
         <button type="button" className={sport === 'tennis' ? 'active' : ''} onClick={() => {
           setSport('tennis');
-          // Um perfil vindo da corrida pode não ter referência de punhos — e sem ela o swing
-          // não dispara: o tênis refaz a calibração pedindo as mãos visíveis.
-          if (profileRef.current && !profileRef.current.world.readyWristLocal) recalibrate();
+          // Referências de punho são apenas o re-arm rápido. Sem elas o swing continua
+          // disponível pelo fallback de velocidade baixa, então trocar de esporte não apaga
+          // a calibração do torso nem bloqueia a partida.
         }}>02 · TÊNIS</button>
       </nav>
       <button type="button" className="mute-fab" onClick={toggleMute} title={muted ? 'Áudio desligado' : 'Áudio ligado'}>{muted ? '×' : '♫'}</button>
     </div>
 
     <CameraPip
-      sport={sport}
       videoRef={videoRef} canvasRef={overlayRef} cameraOn={cameraOn} status={cameraStatus} tracking={tracking}
-      calibrationPhase={calibrationPhase} calibrationProgress={calibrationProgress}
-      onStart={() => void startCamera()} onStop={stopCamera} onRecalibrate={recalibrate}
+      onStart={() => void startCamera()} onStop={stopCamera}
     />
   </main>;
 }

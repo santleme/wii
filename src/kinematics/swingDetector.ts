@@ -31,6 +31,9 @@ const MIN_SWING_SPEED_BODY_WIDTHS_PER_SEC = 2;
 const FULL_POWER_SWING_SPEED_BODY_WIDTHS_PER_SEC = 7;
 const SWING_DIRECTION_EPSILON_BODY_WIDTHS_PER_SEC = 0.5;
 const SWING_MIN_DURATION_MS = 30;
+const POSITIONED_REARM_DWELL_MS = 180;
+const VELOCITY_ONLY_REARM_DWELL_MS = 500;
+const REARM_MAX_SAMPLE_GAP_MS = 200;
 export const SWING_MAX_DURATION_MS = 300;
 
 export function hasMeaningfulLateralComponent(speedBodyWidthsPerSecond: number, lateralSpeedBodyWidthsPerSecond: number): boolean {
@@ -66,14 +69,9 @@ export class SwingDetector {
   private pendingSwing?: PendingSwing;
   private lastSwingAt = Number.NEGATIVE_INFINITY;
   private readySince?: number;
+  private lowSpeedSince?: number;
 
   update(snapshot: PoseSnapshot, calibration: CalibrationProfile): SwingOutput | undefined {
-    // Sem referência de punho na calibração não há como medir repouso nem mira — o detector
-    // fica mudo em vez de inventar uma referência posturada ou conservar estado antigo.
-    if (!calibration.world.readyWristLocal) {
-      this.reset();
-      return undefined;
-    }
     const hand = this.hand;
     const wrist = snapshot.worldLandmarks[hand === 'right' ? 16 : 15];
     const shoulder = snapshot.worldLandmarks[hand === 'right' ? 12 : 11];
@@ -100,8 +98,10 @@ export class SwingDetector {
     const vz = (current.z - this.previous.z) / dt;
     const speedBodyWidthsPerSecond = Math.hypot(vx, vy, vz);
     const lateralSpeedBodyWidthsPerSecond = vx;
-    const readyDistance = distance3(current, calibration.world.readyWristLocal[hand]);
+    const readyWrist = calibration.world.readyWristLocal?.[hand];
+    const readyDistance = readyWrist ? distance3(current, readyWrist) : undefined;
     const confidence = landmarkConfidence(leftShoulder, rightShoulder, leftHip, rightHip, wrist);
+    const frameGapMs = current.time - this.previous.time;
     this.previous = current;
 
     if (this.mode === 'ready') {
@@ -165,13 +165,30 @@ export class SwingDetector {
     }
 
     if (this.mode === 'return') {
-      if (readyDistance < 0.35 && speedBodyWidthsPerSecond < 1.2) {
+      const sampleGapMs = frameGapMs;
+      if (sampleGapMs > REARM_MAX_SAMPLE_GAP_MS) {
+        this.readySince = undefined;
+        this.lowSpeedSince = undefined;
+      }
+      if (readyDistance !== undefined && readyDistance < 0.35 && speedBodyWidthsPerSecond < 1.2) {
         this.readySince ??= snapshot.timestampMs;
-        if (snapshot.timestampMs - this.readySince >= 180) this.mode = 'ready';
       } else this.readySince = undefined;
+      if (speedBodyWidthsPerSecond < 1.2) this.lowSpeedSince ??= snapshot.timestampMs;
+      else this.lowSpeedSince = undefined;
+      if (
+        (this.readySince !== undefined && snapshot.timestampMs - this.readySince >= POSITIONED_REARM_DWELL_MS)
+        || (this.lowSpeedSince !== undefined && snapshot.timestampMs - this.lowSpeedSince >= VELOCITY_ONLY_REARM_DWELL_MS)
+      ) {
+        this.mode = 'ready';
+        this.readySince = undefined;
+        this.lowSpeedSince = undefined;
+      }
     }
     return undefined;
   }
+
+  /** Explicitly rejected/degraded samples break re-arm continuity even when no valid sample reaches this detector. */
+  interruptRearm(): void { this.readySince = undefined; this.lowSpeedSince = undefined; }
 
   /** A swing in flight that has not confirmed yet: the arbiter may hold a rival's confirmation for it. */
   hasPending(): boolean { return this.pendingSwing !== undefined; }
@@ -179,8 +196,9 @@ export class SwingDetector {
   private enterReturn(): void {
     this.pendingSwing = undefined;
     this.readySince = undefined;
+    this.lowSpeedSince = undefined;
     this.mode = 'return';
   }
 
-  reset(): void { this.xFilter.reset(); this.yFilter.reset(); this.zFilter.reset(); this.previous = undefined; this.mode = 'return'; this.pendingSwing = undefined; this.lastSwingAt = Number.NEGATIVE_INFINITY; this.readySince = undefined; }
+  reset(): void { this.xFilter.reset(); this.yFilter.reset(); this.zFilter.reset(); this.previous = undefined; this.mode = 'return'; this.pendingSwing = undefined; this.lastSwingAt = Number.NEGATIVE_INFINITY; this.readySince = undefined; this.lowSpeedSince = undefined; }
 }

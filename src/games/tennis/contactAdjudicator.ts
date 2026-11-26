@@ -4,17 +4,9 @@ import { solveOutgoing, type BallState } from './ballistics';
  * Pure swing adjudication by timing — the heart of the tennis design
  * (docs/design-tenis.md §3.4). No DOM, no Three.js, no randomness, no global time.
  *
- * This module carries two contracts over the same mechanic:
- *
- * - `adjudicateContact` — the integration API consumed by TennisGame. Direction comes
- *   from WHEN the swing peaked relative to the ball's arrival, computed spatially
- *   against the ball state rewound to the physical peak instant, so detection latency
- *   cannot corrupt timing. Adds spin, smash and movement-penalty effects.
- * - `adjudicateSwing` — the minimal temporal-input contract: the caller supplies the
- *   ideal plane-crossing timestamp and the swing's peak timestamp explicitly, and gets
- *   back contact/whiff with CEDO/PERFEITO/TARDE feedback, a continuous lateral angle
- *   mirrored for the backhand, and the exit speed. Nothing the other contract does not
- *   already imply — it exists for callers that adjudicate purely on timestamps.
+ * Direction comes from WHEN the swing peaked relative to the ball's arrival, computed
+ * spatially against the ball state rewound to the physical peak instant, so detection
+ * latency cannot corrupt timing. Adds spin, smash and movement-penalty effects.
  */
 
 export interface SwingContactInput {
@@ -174,106 +166,3 @@ export function adjudicateContact(query: AdjudicationQuery): ContactOutcome {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Minimal temporal contract — adjudication purely on timestamps.
-// ---------------------------------------------------------------------------
-
-export type SwingSide = 'forehand' | 'backhand';
-export type ContactFeedback = 'CEDO' | 'PERFEITO' | 'TARDE';
-export type TimingWhiffReason = 'dead-ball' | 'timing' | 'out-of-reach';
-
-export interface AdjudicatorConfig {
-  /** Half-window around the ideal instant inside which contact is possible. */
-  readonly windowMs: number;
-  /** Half-window inside which the timing reads as PERFEITO. */
-  readonly perfectWindowMs: number;
-  /** Lateral distance from the avatar centre within which the ball is reachable. */
-  readonly lateralReach: number;
-  /** Angle swept at the edge of the timing window; extreme timing misses wide by geometry. */
-  readonly maxLateralAngleRad: number;
-  /** Exit speed range in units/s, interpolated by power01. */
-  readonly minExitSpeed: number;
-  readonly maxExitSpeed: number;
-}
-
-export const DEFAULT_ADJUDICATOR_CONFIG: AdjudicatorConfig = {
-  windowMs: 280,
-  perfectWindowMs: 80,
-  lateralReach: 1.15,
-  maxLateralAngleRad: (20 * Math.PI) / 180,
-  minExitSpeed: 11,
-  maxExitSpeed: 20,
-};
-
-export interface AdjudicateSwingInput {
-  /** Best estimate of the ball state at the contact moment (position and bounces are read). */
-  readonly ball: BallState;
-  /** Absolute time the ball crosses the contact plane in the hittable band. */
-  readonly idealCrossingTimestampMs: number;
-  /** Absolute time of the swing peak as estimated by the detector. */
-  readonly peakTimestampMs: number;
-  readonly side: SwingSide;
-  /** Swing power 0..1 as reported by the detector; clamped defensively. */
-  readonly power01: number;
-  /** Lateral position of the hitting avatar's centre. */
-  readonly avatarX: number;
-}
-
-export interface ContactHit {
-  readonly kind: 'contact';
-  /** Signed: negative means the swing peaked before the ideal instant (early). */
-  readonly timingErrorMs: number;
-  /** 1 at perfect timing, decaying linearly to 0 at the window edge. */
-  readonly quality01: number;
-  readonly feedback: ContactFeedback;
-  /**
-   * Signed lateral angle of the outgoing shot: positive sweeps toward +x for a
-   * forehand as the contact gets later, and the backhand mirrors it. Convert to a
-   * lateral target downstream with x0 + tan(angle) · forwardDistance.
-   */
-  readonly lateralAngleRad: number;
-  /** Ball speed right after the hit, in units/s. */
-  readonly exitSpeed: number;
-}
-
-export interface ContactWhiff {
-  readonly kind: 'whiff';
-  readonly timingErrorMs: number;
-  readonly reason: TimingWhiffReason;
-}
-
-export type SwingAdjudication = ContactHit | ContactWhiff;
-
-/**
- * Timestamp-contract adjudication: `timingErrorMs = peakTimestampMs − idealCrossingTimestampMs`,
- * both on the same clock so detection latency cancels out. Contact requires the error inside
- * the window, a live ball (fewer than two bounces) and the ball inside the lateral reach.
- */
-export function adjudicateSwing(
-  input: AdjudicateSwingInput,
-  config: AdjudicatorConfig = DEFAULT_ADJUDICATOR_CONFIG,
-): SwingAdjudication {
-  const timingErrorMs = input.peakTimestampMs - input.idealCrossingTimestampMs;
-
-  if (input.ball.bounces >= 2) return { kind: 'whiff', timingErrorMs, reason: 'dead-ball' };
-  // NaN/Infinity never compare true against the window, so without the explicit
-  // finite guard they would slip through and be judged perfect contact.
-  if (!Number.isFinite(timingErrorMs) || Math.abs(timingErrorMs) > config.windowMs) {
-    return { kind: 'whiff', timingErrorMs, reason: 'timing' };
-  }
-  if (Math.abs(input.ball.position.x - input.avatarX) > config.lateralReach) {
-    return { kind: 'whiff', timingErrorMs, reason: 'out-of-reach' };
-  }
-
-  const normalizedError = timingErrorMs / config.windowMs;
-  const quality01 = 1 - Math.abs(normalizedError);
-  const feedback: ContactFeedback =
-    Math.abs(timingErrorMs) <= config.perfectWindowMs ? 'PERFEITO' : timingErrorMs < 0 ? 'CEDO' : 'TARDE';
-  const mirror = input.side === 'forehand' ? 1 : -1;
-  const lateralAngleRad = normalizedError * config.maxLateralAngleRad * mirror;
-  // Non-finite power means a detector glitch, never a super-powered shot: floor at 0.
-  const power01 = Number.isFinite(input.power01) ? Math.min(1, Math.max(0, input.power01)) : 0;
-  const exitSpeed = config.minExitSpeed + power01 * (config.maxExitSpeed - config.minExitSpeed);
-
-  return { kind: 'contact', timingErrorMs, quality01, feedback, lateralAngleRad, exitSpeed };
-}
