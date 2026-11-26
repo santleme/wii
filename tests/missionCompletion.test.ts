@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyMissionReward, MissionCompletionCache, missionCompletionKey } from '../src/games/engagement/missionCompletion';
+import { MissionCompletionCache, missionCompletionKey } from '../src/games/engagement/missionCompletion';
 import { MissionStore } from '../src/games/engagement/missionStore';
 import { MissionTracker } from '../src/games/engagement/missionTracker';
 
@@ -45,26 +45,4 @@ describe('mission completion callbacks', () => {
     expect(cache.run(key, () => tracker.update(1))).toBe(false);
   });
 
-  it.each(['disposal', 'rematch'] as const)('persists a claimed reward but suppresses stale notifications after %s', async (invalidation) => {
-    const claim = deferred<boolean>();
-    let disposed = false;
-    let matchGeneration = 4;
-    const claimedGeneration = matchGeneration;
-    let persistedXp = 0;
-    let notifications = 0;
-
-    const result = applyMissionReward(
-      claim.promise,
-      () => { persistedXp += 25; },
-      () => { notifications += 1; },
-      () => !disposed && matchGeneration === claimedGeneration,
-    );
-    if (invalidation === 'disposal') disposed = true;
-    else matchGeneration += 1;
-    claim.resolve(true);
-
-    await expect(result).resolves.toBe(true);
-    expect(persistedXp).toBe(25);
-    expect(notifications).toBe(0);
-  });
 });

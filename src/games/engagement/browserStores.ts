@@ -13,9 +13,12 @@ let browserStores: EngagementStores | undefined;
  * their in-memory fallback intact when localStorage is unavailable and an engine is remounted.
  */
 export function getBrowserEngagementStores(): EngagementStores {
-  browserStores ??= {
-    missions: createBrowserMissionStore(),
-    progress: createBrowserProgressStore(),
-  };
+  if (!browserStores) {
+    const progress = createBrowserProgressStore();
+    browserStores = {
+      missions: createBrowserMissionStore(progress),
+      progress,
+    };
+  }
   return browserStores;
 }

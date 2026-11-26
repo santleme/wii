@@ -5,7 +5,7 @@ import type { GameHudState as CoreGameHudState } from '../core/hud';
 import { localDateIso, MISSION_XP } from '../engagement/missions';
 import { getBrowserEngagementStores } from '../engagement/browserStores';
 import { DailyMissionSession } from '../engagement/dailyMissionSession';
-import { applyMissionReward, MissionCompletionCache } from '../engagement/missionCompletion';
+import { MissionCompletionCache } from '../engagement/missionCompletion';
 import { progressionFor, type SportProgress } from '../engagement/progression';
 import { hash32, mulberry32 } from '../engagement/seededRandom';
 import { type Feedback, awardText, SHAKE_DURATION_S, shakeOffset } from './feedback';
@@ -270,21 +270,23 @@ export class TrackGame {
         score: this.score.peak,
         bestCombo: this.score.bestComboCount,
       });
-      const completion = this.missionSession.tracker.update(current);
+      const tracker = this.missionSession.tracker;
+      const willComplete = !tracker.isCompleted && current >= tracker.mission.target;
+      const rankBefore = willComplete
+        ? progressionFor(this.progressStore.load('track').xp).rankIndex
+        : undefined;
+      const completion = tracker.update(current);
       if (completion === false) return false;
-      let rankUp = '';
-      return applyMissionReward(
-        completion,
-        async () => {
-          const reward = await this.progressStore.addXp('track', MISSION_XP);
-          this.progress = this.progressStore.load('track');
-          rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
-        },
-        () => {
-          if (!this.result?.achievement) this.showFeedback('milestone', `MISSÃO +${MISSION_XP} XP${rankUp}`);
-        },
-        () => !this.disposed,
-      );
+      return completion.then((claimed) => {
+        if (!claimed) return false;
+        this.progress = this.progressStore.load('track');
+        const rank = progressionFor(this.progress.xp);
+        const rankUp = rankBefore !== undefined && rank.rankIndex > rankBefore ? ` · RANK ${rank.rank}!` : '';
+        if (!this.disposed && !this.result?.achievement) {
+          this.showFeedback('milestone', `MISSÃO +${MISSION_XP} XP${rankUp}`);
+        }
+        return true;
+      }, () => false);
     });
   }
 
@@ -297,9 +299,10 @@ export class TrackGame {
     const xpEarned = trackRunXp(finalScore);
     const previous = readTrackRanking();
     const ranked = rankRun(previous, finalScore);
+    const progressRecord = this.progressStore.record('track', finalScore, xpEarned);
     writeTrackRanking(ranked.ranking);
 
-    void this.progressStore.record('track', finalScore, xpEarned).then((progressResult) => {
+    void progressRecord.then((progressResult) => {
       const isRecord = progressResult.isRecord && isTrackRecord(finalScore, this.legacyBestScore);
       this.progress = this.progressStore.load('track');
       this.result = {

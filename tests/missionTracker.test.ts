@@ -84,6 +84,24 @@ describe('mission tracker', () => {
     expect(progressStore.load('track').xp).toBe(MISSION_XP);
   });
 
+  it('atomically rewards only the first stale tracker in the browser store', async () => {
+    const backing = new MemoryStorage();
+    const lock = new SerialMissionCompletionLock();
+    const progressStore = new ProgressStore(backing, lock);
+    const missionStore = new MissionStore(undefined, undefined, progressStore);
+    const firstTab = new MissionTracker(missionStore, '2026-11-25', mission, MISSION_XP);
+    const secondTab = new MissionTracker(missionStore, '2026-11-25', mission, MISSION_XP);
+
+    const firstClaim = firstTab.update(100);
+    const secondClaim = secondTab.update(100);
+    expect(firstClaim).not.toBe(false);
+    expect(secondClaim).not.toBe(false);
+    await expect(firstClaim).resolves.toBe(true);
+    await expect(secondClaim).resolves.toBe(false);
+
+    expect(progressStore.load('track').xp).toBe(MISSION_XP);
+  });
+
   it('serializes two stale trackers that interleave between completion read and write', async () => {
     const missionBacking = new ReentrantStorage();
     const lock = new SerialMissionCompletionLock();

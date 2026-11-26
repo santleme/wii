@@ -12,7 +12,7 @@ import {
 import { localDateIso, MISSION_XP } from '../engagement/missions';
 import { getBrowserEngagementStores } from '../engagement/browserStores';
 import { DailyMissionSession } from '../engagement/dailyMissionSession';
-import { applyMissionReward, MissionCompletionCache } from '../engagement/missionCompletion';
+import { MissionCompletionCache } from '../engagement/missionCompletion';
 import { progressionFor, type ProgressRecordResult } from '../engagement/progression';
 import { advanceBall, createBall, solveOutgoing, timeAtPlane, type BallState } from './ballistics';
 import { adjudicateContact, type ContactOutcome } from './contactAdjudicator';
@@ -590,22 +590,25 @@ export class TennisGame {
   private updateMission(): false | Promise<boolean> {
     const matchGeneration = this.matchGeneration;
     return this.missionCompletion.run(this.missionSession.completionKey, () => {
-      const completion = this.missionSession.tracker.update(this.currentMissionValue());
+      const tracker = this.missionSession.tracker;
+      const missionValue = this.currentMissionValue();
+      const willComplete = !tracker.isCompleted && missionValue >= tracker.mission.target;
+      const rankBefore = willComplete
+        ? progressionFor(this.progressStore.load('tennis').xp).rankIndex
+        : undefined;
+      const completion = tracker.update(missionValue);
       if (completion === false) return false;
-      let rankUp = '';
-      return applyMissionReward(
-        completion,
-        async () => {
-          const reward = await this.progressStore.addXp('tennis', MISSION_XP);
-          this.progress = this.progressStore.load('tennis');
-          rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
-        },
-        () => {
+      return completion.then((claimed) => {
+        if (!claimed) return false;
+        this.progress = this.progressStore.load('tennis');
+        const rank = progressionFor(this.progress.xp);
+        const rankUp = rankBefore !== undefined && rank.rankIndex > rankBefore ? ` · RANK ${rank.rank}!` : '';
+        if (!this.disposed && matchGeneration === this.matchGeneration) {
           this.setFeedback(`MISSÃO +${MISSION_XP} XP${rankUp}`, 'good');
           this.audio?.milestone();
-        },
-        () => !this.disposed && matchGeneration === this.matchGeneration,
-      );
+        }
+        return true;
+      }, () => false);
     });
   }
 

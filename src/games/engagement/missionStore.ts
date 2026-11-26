@@ -5,6 +5,11 @@ const STORAGE_KEY = 'wii-web-sports.missions.v1';
 const MAX_STORED_DAYS = 14;
 const COMPLETION_LOCK_NAME = 'wii-web-sports.mission-completion.v1';
 
+export interface MissionProgressBackend {
+  isMissionCompleted(dateIso: string, sport: SportKey, missionId: string): boolean;
+  completeMission(dateIso: string, sport: SportKey, missionId: string, rewardXp: number): Promise<boolean>;
+}
+
 export interface MissionCompletionLock {
   request<T>(name: string, callback: () => T): Promise<T>;
 }
@@ -17,8 +22,8 @@ type MissionData = {
 const emptyData = (): MissionData => ({ version: 1, days: {} });
 
 /**
- * Completion-only mission repository. Progress itself is live state; only the unlock is persisted.
- * Persistent claims require an origin-wide lock so a read/check/write cannot race across tabs.
+ * Mission completion repository. Browser games delegate to ProgressStore so a mission claim and
+ * its XP are one durable mutation; the standalone storage path remains useful for pure tracker tests.
  */
 export class MissionStore {
   private memory = emptyData();
@@ -27,13 +32,16 @@ export class MissionStore {
   constructor(
     private readonly storage?: KeyValueStorage,
     private readonly completionLock?: MissionCompletionLock,
+    private readonly progressBackend?: MissionProgressBackend,
   ) {}
 
   isCompleted(dateIso: string, sport: SportKey, missionId: string): boolean {
+    if (this.progressBackend) return this.progressBackend.isMissionCompleted(dateIso, sport, missionId);
     return (this.read().days[this.key(dateIso, sport)] ?? []).includes(missionId);
   }
 
-  async complete(dateIso: string, sport: SportKey, missionId: string): Promise<boolean> {
+  async complete(dateIso: string, sport: SportKey, missionId: string, rewardXp = 0): Promise<boolean> {
+    if (this.progressBackend) return this.progressBackend.completeMission(dateIso, sport, missionId, rewardXp);
     if (!this.storage || this.storageFailed) return this.completeInMemory(dateIso, sport, missionId);
 
     // Persist sequential claims without Web Locks; cross-tab races cannot be prevented here.
@@ -111,7 +119,9 @@ export class MissionStore {
 
 }
 
-export function createBrowserMissionStore(): MissionStore {
+export function createBrowserMissionStore(progressBackend?: MissionProgressBackend): MissionStore {
+  if (progressBackend) return new MissionStore(undefined, undefined, progressBackend);
+
   let storage: KeyValueStorage | undefined;
   let completionLock: MissionCompletionLock | undefined;
 

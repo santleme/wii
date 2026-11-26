@@ -13,6 +13,7 @@ export class MissionTracker {
     private readonly store: MissionStore,
     private readonly dateIso: string,
     readonly mission: DailyMission,
+    private readonly rewardXp = 0,
   ) {
     this.completed = store.isCompleted(dateIso, mission.sport, mission.id);
   }
@@ -34,7 +35,7 @@ export class MissionTracker {
     if (Number.isFinite(rawValue)) this.value = Math.max(this.value, Math.max(0, rawValue));
     if (this.completed || this.value < this.mission.target) return false;
     this.completed = true;
-    return this.store.complete(this.dateIso, this.mission.sport, this.mission.id).catch(() => false);
+    return this.store.complete(this.dateIso, this.mission.sport, this.mission.id, this.rewardXp).catch(() => false);
   }
 
   progress01(): number {

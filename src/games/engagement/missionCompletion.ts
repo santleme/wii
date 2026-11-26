@@ -41,18 +41,3 @@ export class MissionCompletionCache {
     return current.promise;
   }
 }
-
-/** Persists claimed XP even if its game has unmounted; only live engines may notify the player. */
-export function applyMissionReward(
-  completion: Promise<boolean>,
-  grantReward: () => void | Promise<void>,
-  notify: () => void,
-  isActive: () => boolean,
-): Promise<boolean> {
-  return completion.then(async (claimed) => {
-    if (!claimed) return false;
-    await grantReward();
-    if (isActive()) notify();
-    return true;
-  }, () => false);
-}

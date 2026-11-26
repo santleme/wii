@@ -1,4 +1,4 @@
-import { dailyMissionFor, type DailyMission } from './missions';
+import { dailyMissionFor, MISSION_XP, type DailyMission } from './missions';
 import type { MissionStore } from './missionStore';
 import { missionCompletionKey } from './missionCompletion';
 import { MissionTracker } from './missionTracker';
@@ -17,7 +17,7 @@ export class DailyMissionSession {
   ) {
     this.currentDateIso = dateIso;
     this.currentMission = dailyMissionFor(sport, dateIso);
-    this.currentTracker = new MissionTracker(store, dateIso, this.currentMission);
+    this.currentTracker = new MissionTracker(store, dateIso, this.currentMission, MISSION_XP);
   }
 
   get mission(): DailyMission {
@@ -41,6 +41,6 @@ export class DailyMissionSession {
 
     this.currentDateIso = dateIso;
     this.currentMission = dailyMissionFor(this.sport, dateIso);
-    this.currentTracker = new MissionTracker(this.store, dateIso, this.currentMission);
+    this.currentTracker = new MissionTracker(this.store, dateIso, this.currentMission, MISSION_XP);
   }
 }
