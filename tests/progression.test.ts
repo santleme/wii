@@ -91,16 +91,4 @@ describe('progress storage', () => {
     expect(store.load('track')).toEqual({ bestScore: 100, plays: 1, xp: 10 });
   });
 
-  it('imports an older personal best without adding xp or a play', () => {
-    const store = new ProgressStore();
-    store.record('track', 1200, 120);
-    store.record('track', 500, 50);
-
-    const progress = store.ensureBestScore('track', 1500);
-    const nextRun = store.record('track', 300, 30);
-
-    expect(progress).toEqual({ bestScore: 1500, plays: 2, xp: 170 });
-    expect(nextRun.isRecord).toBe(false);
-    expect(nextRun.progress).toEqual({ bestScore: 1500, plays: 3, xp: 200 });
-  });
 });

@@ -3,6 +3,7 @@ import { getBrowserEngagementStores } from '../src/games/engagement/browserStore
 import { DailyMissionSession } from '../src/games/engagement/dailyMissionSession';
 import { MissionStore } from '../src/games/engagement/missionStore';
 import type { KeyValueStorage } from '../src/games/engagement/progressStore';
+import { SerialMissionCompletionLock } from './helpers/missionCompletionLock';
 
 class MemoryStorage implements KeyValueStorage {
   private readonly values = new Map<string, string>();
@@ -13,7 +14,7 @@ class MemoryStorage implements KeyValueStorage {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('engagement session lifetime', () => {
-  it('keeps progress and completed missions when an engine is recreated without storage', () => {
+  it('keeps progress and completed missions when an engine is recreated without storage', async () => {
     const blockedStorage: KeyValueStorage = {
       getItem: () => { throw new Error('storage blocked'); },
       setItem: () => { throw new Error('storage blocked'); },
@@ -22,7 +23,7 @@ describe('engagement session lifetime', () => {
 
     const firstEngineStores = getBrowserEngagementStores();
     firstEngineStores.progress.record('track', 800, 80);
-    firstEngineStores.missions.complete('2026-11-25', 'track', 'mission-1');
+    await firstEngineStores.missions.complete('2026-11-25', 'track', 'mission-1');
 
     const restartedEngineStores = getBrowserEngagementStores();
     expect(restartedEngineStores).toBe(firstEngineStores);
@@ -30,10 +31,10 @@ describe('engagement session lifetime', () => {
     expect(restartedEngineStores.missions.isCompleted('2026-11-25', 'track', 'mission-1')).toBe(true);
   });
 
-  it('keeps the current mission through a same-day rematch and rolls over at midnight', () => {
-    const session = new DailyMissionSession(new MissionStore(new MemoryStorage()), 'tennis', '2026-11-25');
+  it('keeps the current mission through a same-day rematch and rolls over at midnight', async () => {
+    const session = new DailyMissionSession(new MissionStore(new MemoryStorage(), new SerialMissionCompletionLock()), 'tennis', '2026-11-25');
     const yesterday = session.mission;
-    expect(session.tracker.update(yesterday.target)).toBe(true);
+    await expect(session.tracker.update(yesterday.target)).resolves.toBe(true);
 
     session.startAttempt('2026-11-25');
     expect(session.mission).toBe(yesterday);

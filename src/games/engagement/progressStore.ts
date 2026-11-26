@@ -39,17 +39,6 @@ export class ProgressStore {
     return normalizeProgress(this.read().sports[sport] ?? emptyProgress());
   }
 
-  /** Imports a score from an older leaderboard without counting a play or awarding XP. */
-  ensureBestScore(sport: SportKey, score: number): SportProgress {
-    const data = this.read();
-    const current = normalizeProgress(data.sports[sport] ?? emptyProgress());
-    const progress = { ...current, bestScore: Math.max(current.bestScore, cleanScore(score)) };
-    if (progress.bestScore !== current.bestScore) {
-      this.write({ version: 1, sports: { ...data.sports, [sport]: progress } });
-    }
-    return progress;
-  }
-
   record(sport: SportKey, score: number, xpEarned: number): ProgressRecordResult {
     const data = this.read();
     const result = recordSportResult(normalizeProgress(data.sports[sport] ?? emptyProgress()), score, xpEarned);
@@ -99,10 +88,6 @@ export class ProgressStore {
       this.memory = data;
     }
   }
-}
-
-function cleanScore(score: number): number {
-  return Number.isFinite(score) && score > 0 ? score : 0;
 }
 
 export function createBrowserProgressStore(): ProgressStore {

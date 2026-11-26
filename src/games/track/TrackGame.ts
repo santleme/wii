@@ -5,7 +5,7 @@ import type { GameHudState as CoreGameHudState } from '../core/hud';
 import { localDateIso, MISSION_XP } from '../engagement/missions';
 import { getBrowserEngagementStores } from '../engagement/browserStores';
 import { DailyMissionSession } from '../engagement/dailyMissionSession';
-import { progressionFor } from '../engagement/progression';
+import { progressionFor, type SportProgress } from '../engagement/progression';
 import { hash32, mulberry32 } from '../engagement/seededRandom';
 import { type Feedback, awardText, SHAKE_DURATION_S, shakeOffset } from './feedback';
 import { adjudicationDt, applySprint, applyStep, easeSpeed, type Gait, gaitFor, nextPace, type Pace, stumble } from './gait';
@@ -16,7 +16,7 @@ import { highestRankedScore, parseRanking, type RunResult, rankRun } from './ran
 import { RunGate } from './runGate';
 import { fovFor, scrollZ, timeBoost } from './scroll';
 import { type Lane, nextKind, nextLane } from './spawn';
-import { trackMissionValue, trackRecordChase, trackRunXp } from './trackEngagement';
+import { isTrackRecord, loadTrackProgress, trackMissionValue, trackRecordChase, trackRunXp } from './trackEngagement';
 import { isPerfectJump, TrackScore } from './trackScore';
 
 export interface TrackRunResult extends RunResult {
@@ -65,7 +65,8 @@ export class TrackGame {
   private readonly missionSession = new DailyMissionSession(this.engagementStores.missions, 'track', this.missionDate);
   /** The day's obstacle sequence is repeatable; spawn timing still depends on the player's movement. */
   private readonly spawnRandom = mulberry32(hash32(`${this.missionDate}:track`));
-  private progress = this.progressStore.load('track');
+  private progress: SportProgress;
+  private legacyBestScore = 0;
   private lane = 0;
   /** Speed asked for by the player and who set it; `shownSpeed` eases toward it. */
   private pace: Pace = { owner: 'camera', speed01: 0, cadenceSpm: 0 };
@@ -86,10 +87,13 @@ export class TrackGame {
   private shakeTime = 0;
   private readonly gate = new RunGate();
   private result?: TrackRunResult;
+  private missionCompletion?: { missionId: string; promise: Promise<boolean> };
   private status = 'Ande ou corra no lugar com a câmera, ou use ↓';
 
   constructor(canvas: HTMLCanvasElement, private readonly onHud: (state: GameHudState) => void) {
-    this.progress = this.progressStore.ensureBestScore('track', highestRankedScore(readTrackRanking()));
+    const trackProgress = loadTrackProgress(this.progressStore, highestRankedScore(readTrackRanking()));
+    this.progress = trackProgress.progress;
+    this.legacyBestScore = trackProgress.legacyBestScore;
     this.scene.background = new THREE.Color(0x223038);
     this.scene.fog = new THREE.Fog(0x223038, 25, 75);
     this.camera.position.set(0, 3.4, 11);
@@ -257,15 +261,23 @@ export class TrackGame {
   }
 
   private updateMission(): void {
+    const missionId = this.missionSession.mission.id;
+    if (this.missionCompletion?.missionId === missionId) return;
     const current = trackMissionValue(this.missionSession.mission.metric, {
       score: this.score.peak,
       bestCombo: this.score.bestComboCount,
     });
-    if (!this.missionSession.tracker.update(current)) return;
-    const reward = this.progressStore.addXp('track', MISSION_XP);
-    this.progress = reward.progress;
-    const rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
-    this.showFeedback('milestone', `MISSÃO +${MISSION_XP} XP${rankUp}`);
+    const completion = this.missionSession.tracker.update(current);
+    if (completion === false) return;
+    const promise = completion.then((claimed) => {
+      if (!claimed) return;
+      const reward = this.progressStore.addXp('track', MISSION_XP);
+      this.progress = reward.progress;
+      const rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
+      if (!this.result?.achievement) this.showFeedback('milestone', `MISSÃO +${MISSION_XP} XP${rankUp}`);
+      return true;
+    });
+    this.missionCompletion = { missionId, promise: promise.then((claimed) => claimed === true) };
   }
 
   /** The ranking lives in this browser only; blocked storage just means it is not remembered. */
@@ -274,12 +286,13 @@ export class TrackGame {
     const finalScore = this.score.peak;
     const xpEarned = trackRunXp(finalScore);
     const progressResult = this.progressStore.record('track', finalScore, xpEarned);
+    const isRecord = progressResult.isRecord && isTrackRecord(finalScore, this.legacyBestScore);
     this.progress = progressResult.progress;
 
     const previous = readTrackRanking();
     const achievement = progressResult.rankUp
       ? `RANK ${progressResult.after.rank}`
-      : progressResult.isRecord
+      : isRecord
         ? 'NOVO RECORDE'
         : undefined;
     this.result = {
@@ -291,7 +304,7 @@ export class TrackGame {
     writeTrackRanking(this.result.ranking);
 
     if (progressResult.rankUp) this.showFeedback('milestone', `RANK ${progressResult.after.rank}!`);
-    else if (progressResult.isRecord) this.showFeedback('milestone', 'NOVO RECORDE!');
+    else if (isRecord) this.showFeedback('milestone', 'NOVO RECORDE!');
     else this.publishHud();
   }
 
@@ -309,7 +322,10 @@ export class TrackGame {
       : this.gate.phase === 'paused'
         ? { title: 'PAUSADO', detail: 'Tracking perdido · volte ao quadro ou aperte uma tecla para seguir no teclado' }
         : undefined;
-    const chase = this.result ? undefined : trackRecordChase(this.progress.bestScore, this.score.peak);
+    const chase = this.result ? undefined : trackRecordChase(
+      Math.max(this.progress.bestScore, this.legacyBestScore),
+      this.score.peak,
+    );
     const detail = this.result
       ? `FINAL ${this.result.points} · COMBO MÁX ×${this.result.bestCombo} · +${this.result.xpEarned} XP${this.result.achievement ? ` · ${this.result.achievement}` : ''}`
       : chase;

@@ -3,6 +3,7 @@ import { dailyMissionFor, localDateIso, missionProgress01 } from '../src/games/e
 import { MissionStore } from '../src/games/engagement/missionStore';
 import type { KeyValueStorage } from '../src/games/engagement/progressStore';
 import type { SportKey } from '../src/games/engagement/progression';
+import { SerialMissionCompletionLock } from './helpers/missionCompletionLock';
 
 class MemoryStorage implements KeyValueStorage {
   private readonly values = new Map<string, string>();
@@ -39,25 +40,26 @@ describe('daily missions', () => {
 });
 
 describe('mission completion storage', () => {
-  it('persists completion independently by date and sport', () => {
+  it('persists completion independently by date and sport', async () => {
     const backing = new MemoryStorage();
-    const store = new MissionStore(backing);
+    const lock = new SerialMissionCompletionLock();
+    const store = new MissionStore(backing, lock);
     const mission = dailyMissionFor('track', '2026-11-25');
-    store.complete('2026-11-25', 'track', mission.id);
-    const reloaded = new MissionStore(backing);
+    await store.complete('2026-11-25', 'track', mission.id);
+    const reloaded = new MissionStore(backing, lock);
     expect(reloaded.isCompleted('2026-11-25', 'track', mission.id)).toBe(true);
     expect(reloaded.isCompleted('2026-11-25', 'tennis', mission.id)).toBe(false);
     expect(reloaded.isCompleted('2026-11-26', 'track', mission.id)).toBe(false);
   });
 
-  it('is idempotent and survives a storage write failure in memory', () => {
+  it('is idempotent and survives a storage write failure in memory', async () => {
     const failing: KeyValueStorage = {
       getItem: () => null,
       setItem: () => { throw new Error('quota'); },
     };
-    const store = new MissionStore(failing);
-    store.complete('2026-11-25', 'track', 'mission');
-    store.complete('2026-11-25', 'track', 'mission');
+    const store = new MissionStore(failing, new SerialMissionCompletionLock());
+    await store.complete('2026-11-25', 'track', 'mission');
+    await store.complete('2026-11-25', 'track', 'mission');
     expect(store.isCompleted('2026-11-25', 'track', 'mission')).toBe(true);
   });
 
@@ -66,5 +68,15 @@ describe('mission completion storage', () => {
     backing.setItem('wii-web-sports.missions.v1', '{bad');
     const store = new MissionStore(backing);
     expect(store.isCompleted('2026-11-25', 'track', 'mission')).toBe(false);
+  });
+
+  it('uses a per-document memory fallback when origin-wide locks are unavailable', async () => {
+    const backing = new MemoryStorage();
+    const store = new MissionStore(backing);
+
+    await expect(store.complete('2026-11-25', 'track', 'mission')).resolves.toBe(true);
+
+    expect(store.isCompleted('2026-11-25', 'track', 'mission')).toBe(true);
+    expect(new MissionStore(backing).isCompleted('2026-11-25', 'track', 'mission')).toBe(false);
   });
 });

@@ -29,12 +29,12 @@ export class MissionTracker {
     this.value = 0;
   }
 
-  /** Returns true only on the update that first completes the mission. */
-  update(rawValue: number): boolean {
+  /** Returns true only for the tracker that claims the persisted completion. */
+  update(rawValue: number): false | Promise<boolean> {
     if (Number.isFinite(rawValue)) this.value = Math.max(this.value, Math.max(0, rawValue));
     if (this.completed || this.value < this.mission.target) return false;
     this.completed = true;
-    return this.store.complete(this.dateIso, this.mission.sport, this.mission.id);
+    return this.store.complete(this.dateIso, this.mission.sport, this.mission.id).catch(() => false);
   }
 
   progress01(): number {

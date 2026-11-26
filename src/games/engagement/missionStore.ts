@@ -3,6 +3,11 @@ import type { KeyValueStorage } from './progressStore';
 
 const STORAGE_KEY = 'wii-web-sports.missions.v1';
 const MAX_STORED_DAYS = 14;
+const COMPLETION_LOCK_NAME = 'wii-web-sports.mission-completion.v1';
+
+export interface MissionCompletionLock {
+  request<T>(name: string, callback: () => T): Promise<T>;
+}
 
 type MissionData = {
   version: 1;
@@ -11,27 +16,64 @@ type MissionData = {
 
 const emptyData = (): MissionData => ({ version: 1, days: {} });
 
-/** Completion-only mission repository. Progress itself is live state; only the unlock is persisted. */
+/**
+ * Completion-only mission repository. Progress itself is live state; only the unlock is persisted.
+ * Persistent claims require an origin-wide lock so a read/check/write cannot race across tabs.
+ */
 export class MissionStore {
   private memory = emptyData();
   private storageFailed = false;
 
-  constructor(private readonly storage?: KeyValueStorage) {}
+  constructor(
+    private readonly storage?: KeyValueStorage,
+    private readonly completionLock?: MissionCompletionLock,
+  ) {}
 
   isCompleted(dateIso: string, sport: SportKey, missionId: string): boolean {
     return (this.read().days[this.key(dateIso, sport)] ?? []).includes(missionId);
   }
 
-  complete(dateIso: string, sport: SportKey, missionId: string): boolean {
+  async complete(dateIso: string, sport: SportKey, missionId: string): Promise<boolean> {
+    if (!this.storage || this.storageFailed) return this.completeInMemory(dateIso, sport, missionId);
+
+    if (!this.completionLock) {
+      this.enableMemoryFallback();
+      return this.completeInMemory(dateIso, sport, missionId);
+    }
+
+    try {
+      return await this.completionLock.request(COMPLETION_LOCK_NAME, () => (
+        this.completeWithCurrentData(dateIso, sport, missionId)
+      ));
+    } catch {
+      // Without the origin-wide lock, keep gameplay working with this document's memory copy.
+      this.enableMemoryFallback();
+      return this.completeInMemory(dateIso, sport, missionId);
+    }
+  }
+
+  private completeWithCurrentData(dateIso: string, sport: SportKey, missionId: string): boolean {
     const data = this.read();
     const key = this.key(dateIso, sport);
     const completed = data.days[key] ?? [];
     if (completed.includes(missionId)) return false;
-    const days: Record<string, string[]> = { ...data.days, [key]: [...completed, missionId] };
+    this.write(this.withCompletion(data, key, missionId));
+    return true;
+  }
+
+  private completeInMemory(dateIso: string, sport: SportKey, missionId: string): boolean {
+    const key = this.key(dateIso, sport);
+    const completed = this.memory.days[key] ?? [];
+    if (completed.includes(missionId)) return false;
+    this.memory = this.withCompletion(this.memory, key, missionId);
+    return true;
+  }
+
+  private withCompletion(data: MissionData, key: string, missionId: string): MissionData {
+    const days: Record<string, string[]> = { ...data.days, [key]: [...(data.days[key] ?? []), missionId] };
     const keys = Object.keys(days).sort().reverse();
     for (const oldKey of keys.slice(MAX_STORED_DAYS)) delete days[oldKey];
-    this.write({ version: 1, days });
-    return true;
+    return { version: 1, days };
   }
 
   private key(dateIso: string, sport: SportKey): string {
@@ -68,12 +110,30 @@ export class MissionStore {
       this.memory = data;
     }
   }
+
+  private enableMemoryFallback(): void {
+    if (this.storageFailed) return;
+    this.memory = this.read();
+    this.storageFailed = true;
+  }
 }
 
 export function createBrowserMissionStore(): MissionStore {
+  let storage: KeyValueStorage | undefined;
+  let completionLock: MissionCompletionLock | undefined;
+
   try {
-    return new MissionStore(window.localStorage);
-  } catch {
-    return new MissionStore();
-  }
+    storage = window.localStorage;
+  } catch { /* blocked storage keeps mission completion in this document's memory */ }
+
+  try {
+    const lockManager = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    if (lockManager) {
+      completionLock = {
+        request: (name, callback) => lockManager.request(name, () => callback()),
+      };
+    }
+  } catch { /* unavailable Web Locks use the same per-document memory fallback */ }
+
+  return new MissionStore(storage, completionLock);
 }
