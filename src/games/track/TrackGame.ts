@@ -277,7 +277,7 @@ export class TrackGame {
         completion,
         async () => {
           const reward = await this.progressStore.addXp('track', MISSION_XP);
-          this.progress = reward.progress;
+          this.progress = this.progressStore.load('track');
           rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
         },
         () => {
@@ -301,7 +301,7 @@ export class TrackGame {
 
     void this.progressStore.record('track', finalScore, xpEarned).then((progressResult) => {
       const isRecord = progressResult.isRecord && isTrackRecord(finalScore, this.legacyBestScore);
-      this.progress = progressResult.progress;
+      this.progress = this.progressStore.load('track');
       this.result = {
         ...ranked,
         xpEarned,

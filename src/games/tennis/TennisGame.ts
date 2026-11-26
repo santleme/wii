@@ -113,6 +113,7 @@ export class TennisGame {
   private readonly rally = new RallyTracker();
   private bestRally = 0;
   private matchRecorded = false;
+  private matchGeneration = 0;
   private matchSummary = '';
   private readonly missionCompletion = new MissionCompletionCache();
   private disposed = false;
@@ -529,6 +530,7 @@ export class TennisGame {
     const youWon = winner === 'player';
     this.setFeedback(headline, youWon ? 'good' : 'bad');
     if (result.matchWonBy) {
+      const matchGeneration = this.matchGeneration;
       const completion = this.finishMatch(result.matchWonBy);
       this.phase = { kind: 'match-over', restartAtMs: now + MATCH_PAUSE_S * 1000 };
       this.status = result.matchWonBy === 'player' ? 'VOCÊ VENCEU A PARTIDA!' : 'Adversário venceu a partida';
@@ -539,7 +541,7 @@ export class TennisGame {
         matchCompletion: Awaited<ReturnType<TennisGame['finishMatch']>>,
         missionJustCompleted: boolean,
       ) => {
-        if (this.disposed) return;
+        if (this.disposed || matchGeneration !== this.matchGeneration) return;
         if (matchCompletion?.record.rankUp) this.setFeedback(`RANK ${matchCompletion.record.after.rank}!`, 'good');
         else if (matchCompletion?.record.isRecord) this.setFeedback('NOVO RECORDE!', 'good');
         else if (!missionJustCompleted) {
@@ -586,6 +588,7 @@ export class TennisGame {
   }
 
   private updateMission(): false | Promise<boolean> {
+    const matchGeneration = this.matchGeneration;
     return this.missionCompletion.run(this.missionSession.completionKey, () => {
       const completion = this.missionSession.tracker.update(this.currentMissionValue());
       if (completion === false) return false;
@@ -594,14 +597,14 @@ export class TennisGame {
         completion,
         async () => {
           const reward = await this.progressStore.addXp('tennis', MISSION_XP);
-          this.progress = reward.progress;
+          this.progress = this.progressStore.load('tennis');
           rankUp = reward.rankUp ? ` · RANK ${reward.after.rank}!` : '';
         },
         () => {
           this.setFeedback(`MISSÃO +${MISSION_XP} XP${rankUp}`, 'good');
           this.audio?.milestone();
         },
-        () => !this.disposed,
+        () => !this.disposed && matchGeneration === this.matchGeneration,
       );
     });
   }
@@ -616,15 +619,22 @@ export class TennisGame {
       bestRally: this.bestRally,
     });
     const xpEarned = matchXp(performanceScore);
+    const pointsWon = this.pointsWon;
+    const pointsLost = this.pointsLost;
+    const bestRally = this.bestRally;
+    const matchGeneration = this.matchGeneration;
     return this.progressStore.record('tennis', performanceScore, xpEarned).then((record) => {
-      this.progress = record.progress;
+      this.progress = this.progressStore.load('tennis');
       const achievement = record.rankUp ? ` · RANK ${record.after.rank}` : record.isRecord ? ' · NOVO RECORDE' : '';
-      this.matchSummary = `DESEMPENHO ${performanceScore} · PONTOS ${this.pointsWon}×${this.pointsLost} · MELHOR RALLY ${this.bestRally} · +${xpEarned} XP${achievement}`;
+      if (matchGeneration === this.matchGeneration) {
+        this.matchSummary = `DESEMPENHO ${performanceScore} · PONTOS ${pointsWon}×${pointsLost} · MELHOR RALLY ${bestRally} · +${xpEarned} XP${achievement}`;
+      }
       return { performanceScore, xpEarned, record };
     });
   }
 
   private resetMatch(now: number): void {
+    this.matchGeneration += 1;
     this.score = createScore('player');
     this.opponentAi = createOpponentAi();
     this.pointsWon = 0;

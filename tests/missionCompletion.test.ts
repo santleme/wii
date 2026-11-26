@@ -45,9 +45,11 @@ describe('mission completion callbacks', () => {
     expect(cache.run(key, () => tracker.update(1))).toBe(false);
   });
 
-  it('persists a claimed reward after disposal but suppresses stale notifications', async () => {
+  it.each(['disposal', 'rematch'] as const)('persists a claimed reward but suppresses stale notifications after %s', async (invalidation) => {
     const claim = deferred<boolean>();
     let disposed = false;
+    let matchGeneration = 4;
+    const claimedGeneration = matchGeneration;
     let persistedXp = 0;
     let notifications = 0;
 
@@ -55,9 +57,10 @@ describe('mission completion callbacks', () => {
       claim.promise,
       () => { persistedXp += 25; },
       () => { notifications += 1; },
-      () => !disposed,
+      () => !disposed && matchGeneration === claimedGeneration,
     );
-    disposed = true;
+    if (invalidation === 'disposal') disposed = true;
+    else matchGeneration += 1;
     claim.resolve(true);
 
     await expect(result).resolves.toBe(true);
