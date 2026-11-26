@@ -82,7 +82,10 @@ export type SportActionEvent =
     };
 
 export interface ContinuousControls {
-  /** Always neutral when cadence tracking is degraded or lost. */
+  /**
+   * Decays smoothly through brief tracking blackouts (coasting) instead of dropping in a
+   * step; neutral only once the coast has run out or the sprint never started.
+   */
   sprintSpeed01: number;
   cadenceSpm: number;
   trackingState: TrackingState;
@@ -101,8 +104,9 @@ interface ActionBase {
   confidence: number;
   /**
    * 'tracked' marks an action measured on a tracked pose; any other state marks a control event emitted because
-   * the action's landmarks could not be confirmed — the sprint stop is 'degraded'/'lost' when tracking decays
-   * or capture stops. Calibration absence gates calibration-dependent controls, never torso cadence itself.
+   * the action's landmarks could not be confirmed — sprint coasting and the final stop are 'degraded'/'lost'
+   * when tracking decays or capture stops. Calibration absence gates calibration-dependent controls, never
+   * torso cadence itself.
    */
   trackingState: TrackingState;
   /** 'cv' events come from the pose pipeline; 'keyboard' events are injected controls, not pose measurements. */

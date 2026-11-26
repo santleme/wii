@@ -32,6 +32,7 @@ const checksums = new Map(
 );
 const models = [
   { prefix: 'pose_landmarker_lite', constant: 'POSE_MODEL_SHA8' },
+  { prefix: 'pose_landmarker_full', constant: 'POSE_FULL_MODEL_SHA8' },
   { prefix: 'hand_landmarker', constant: 'HAND_MODEL_SHA8' },
 ];
 const verifiedModels = [];

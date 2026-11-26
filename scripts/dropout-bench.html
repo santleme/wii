@@ -1,0 +1,230 @@
+<!doctype html>
+<!-- Benchmark de dropout temporal com webcam real: mede frames vazios/baixa-confiança por
+     minuto e blackouts (sequências ruins) por duração — a métrica que decide Lite vs Full.
+     Uso: `npm run build && cp scripts/dropout-bench.html dist/dropout.html && npm run preview`,
+     depois abra http://localhost:4173/dropout.html?model=lite (ou ?model=full).
+     Protocolo guiado de 60 s na tela: parado → correndo → pulando → agachando → livre.
+     Compare os dois modelos com o MESMO protocolo e cole o JSON final nos dois cenários. -->
+<meta charset="utf-8">
+<title>dropout bench</title>
+<style>
+  body { font: 14px/1.5 monospace; background: #101418; color: #d8e0e8; margin: 24px; }
+  video { width: 320px; transform: scaleX(-1); border-radius: 8px; }
+  #phase { font-size: 28px; font-weight: bold; color: #f4b544; }
+  #live { margin: 12px 0; white-space: pre; }
+  #report { white-space: pre-wrap; background: #1a2027; padding: 16px; border-radius: 8px; max-width: 900px; }
+  button { font: inherit; padding: 8px 16px; margin-right: 8px; }
+</style>
+<div id="phase">aguardando câmera…</div>
+<div id="live"></div>
+<video id="cam" autoplay muted playsinline></video>
+<div id="report"></div>
+<script type="module">
+const params = new URLSearchParams(location.search);
+const MODEL_KIND = params.get('model') ?? 'lite';
+const SECS = Number(params.get('secs') ?? 60);
+
+// Descobre o chunk do worker e o wasm versionado a partir do bundle principal (mesmo truque do pose-bench).
+const indexHtml = await (await fetch('/')).text();
+const mainJs = indexHtml.match(/src="([^"]*index-[^"]+\.js)"/)[1];
+const mainSrc = await (await fetch(mainJs)).text();
+const WORKER_URL = `/${mainSrc.match(/assets\/pose\.worker-[A-Za-z0-9_-]+\.js/)[0]}`;
+const semvers = [...new Set(mainSrc.match(/\d+\.\d+\.\d+/g))];
+let WASM = null;
+for (const v of semvers) {
+  const probe = `/mediapipe/wasm-${v}/vision_wasm_module_internal.js`;
+  const res = await fetch(probe, { method: 'HEAD' });
+  if (res.ok && (res.headers.get('content-type') ?? '').includes('javascript')) { WASM = `${location.origin}/mediapipe/wasm-${v}`; break; }
+}
+if (!WASM) throw new Error('dir wasm versionado não encontrado');
+const sums = await (await fetch('/mediapipe/models/SHA256SUMS')).text();
+const sha8Of = (prefix) => sums.match(new RegExp(`([0-9a-f]{64})  ${prefix}\\.`))[1].slice(0, 8);
+const MODEL = `${location.origin}/mediapipe/models/pose_landmarker_${MODEL_KIND}.${sha8Of(`pose_landmarker_${MODEL_KIND}`)}.task`;
+
+// Protocolo guiado: mesmo estímulo nas duas rodadas, para a comparação ser honesta.
+const PROTOCOL = [
+  [0, 'PARADO em pé (10 s)'],
+  [10, 'CORRA no lugar! (20 s)'],
+  [30, 'PULE! (10 s)'],
+  [40, 'AGACHE e levante (10 s)'],
+  [50, 'livre — balance os braços (10 s)'],
+];
+
+const phaseEl = document.getElementById('phase');
+const liveEl = document.getElementById('live');
+const reportEl = document.getElementById('report');
+const video = document.getElementById('cam');
+video.srcObject = await navigator.mediaDevices.getUserMedia({
+  audio: false,
+  video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } },
+});
+await video.play();
+
+const worker = new Worker(WORKER_URL, { type: 'module' });
+const frames = []; // {ts, latencyMs, empty, torsoConf}
+let delegate = 'GPU';
+let readyResolve;
+const readyPromise = new Promise((r) => { readyResolve = r; });
+let inFlight = 0;
+let nextRequestId = 1;
+let lastTs = 0;
+let captureStarted = false;
+let invalidReason;
+const invalidate = (reason) => { invalidReason ??= reason; };
+
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === 'READY') { delegate = m.delegate; readyResolve(); return; }
+  if (m.type === 'FALLBACK') {
+    delegate = m.to;
+    if (captureStarted) invalidate(`delegate caiu para ${m.to} durante a captura`);
+    return;
+  }
+  if (m.type === 'ERROR') {
+    if (m.requestId === inFlight) inFlight = 0;
+    invalidate(`erro do worker em ${m.stage}: ${m.message}`);
+    return;
+  }
+  if (m.type === 'POSE') {
+    if (m.requestId !== inFlight) return;
+    inFlight = 0;
+    const core = [11, 12, 23, 24];
+    const lm = m.landmarks ?? [];
+    const present = core.every((i) => lm[i]);
+    const conf = present ? Math.min(...core.map((i) => Math.min(lm[i].visibility ?? 0, lm[i].presence ?? 0))) : 0;
+    frames.push({ ts: m.timestampMs, latencyMs: performance.now() - sentAt, empty: lm.length === 0, torsoConf: conf });
+  }
+};
+let sentAt = 0;
+worker.postMessage({ type: 'INIT', delegate: 'GPU', wasmBaseUrl: WASM, modelUrl: MODEL });
+await readyPromise;
+
+phaseEl.textContent = 'prepare-se…';
+await new Promise((r) => setTimeout(r, 3000));
+
+const start = performance.now();
+const capture = async () => {
+  if (invalidReason) return;
+  if (inFlight) {
+    if (performance.now() - sentAt > 1000) invalidate('frame sem resposta terminal do worker por mais de 1 s');
+    return;
+  }
+  const bitmap = await createImageBitmap(video);
+  const ts = Math.max(performance.now(), lastTs + 0.01);
+  lastTs = ts;
+  sentAt = performance.now();
+  const requestId = nextRequestId++;
+  inFlight = requestId;
+  worker.postMessage({ type: 'FRAME', timestampMs: ts, bitmap, requestId, captureEpoch: 1 }, [bitmap]);
+};
+captureStarted = true;
+video.requestVideoFrameCallback(function loop() {
+  void capture();
+  video.requestVideoFrameCallback(loop);
+});
+
+const tick = setInterval(() => {
+  const elapsed = (performance.now() - start) / 1000;
+  const phase = [...PROTOCOL].reverse().find(([at]) => elapsed >= at);
+  phaseEl.textContent = elapsed >= SECS ? 'fim!' : `${phase?.[1] ?? ''} — ${Math.max(0, SECS - elapsed).toFixed(0)}s`;
+  const bad = frames.filter((f) => f.empty || f.torsoConf < 0.5).length;
+  const span = frames.length > 1 ? (frames.at(-1).ts - frames[0].ts) / 1000 : 1;
+  liveEl.textContent = invalidReason
+    ? `benchmark inválido: ${invalidReason}`
+    : `poses/s: ${(frames.length / Math.max(1, span)).toFixed(1)}  frames: ${frames.length}  ruins: ${bad} (${(100 * bad / Math.max(1, frames.length)).toFixed(1)}%)`;
+  if (elapsed >= SECS) clearInterval(tick);
+}, 250);
+
+await new Promise((r) => setTimeout(r, SECS * 1000 + 500));
+worker.terminate();
+video.srcObject?.getTracks().forEach((track) => { track.stop(); });
+
+// Blackout cru fecha no primeiro frame bom; recuperação fecha depois de três frames bons
+// consecutivos; perda sustentada segue a regra de 800 ms sem nenhum frame bom do TrackingGate.
+const bad = (f) => f.empty || f.torsoConf < 0.5;
+const rawBlackouts = [];
+let rawOpenAt = null;
+for (const f of frames) {
+  if (bad(f) && rawOpenAt === null) rawOpenAt = f.ts;
+  if (!bad(f) && rawOpenAt !== null) { rawBlackouts.push(f.ts - rawOpenAt); rawOpenAt = null; }
+}
+if (rawOpenAt !== null) rawBlackouts.push(frames.at(-1).ts - rawOpenAt);
+
+const recoveryBlackouts = [];
+let recoveryOpenAt = null;
+let recoveryRun = 0;
+for (const f of frames) {
+  if (bad(f)) {
+    if (recoveryOpenAt === null) recoveryOpenAt = f.ts;
+    recoveryRun = 0;
+    continue;
+  }
+  if (recoveryOpenAt !== null) {
+    recoveryRun += 1;
+    if (recoveryRun >= 3) {
+      recoveryBlackouts.push(f.ts - recoveryOpenAt);
+      recoveryOpenAt = null;
+      recoveryRun = 0;
+    }
+  }
+}
+if (recoveryOpenAt !== null) recoveryBlackouts.push(frames.at(-1).ts - recoveryOpenAt);
+
+const sustainedLosses = [];
+let lastGoodAt;
+let lossStartedAt;
+for (const f of frames) {
+  if (bad(f)) {
+    if (lastGoodAt !== undefined && lossStartedAt === undefined && f.ts - lastGoodAt >= 800) {
+      lossStartedAt = f.ts;
+    }
+    continue;
+  }
+  if (lossStartedAt !== undefined) {
+    sustainedLosses.push(f.ts - lossStartedAt);
+    lossStartedAt = undefined;
+  }
+  lastGoodAt = f.ts;
+}
+if (lossStartedAt !== undefined) sustainedLosses.push(frames.at(-1).ts - lossStartedAt);
+const spanS = frames.length > 1 ? (frames.at(-1).ts - frames[0].ts) / 1000 : 1;
+const minutes = spanS / 60;
+const lat = frames.map((f) => f.latencyMs).sort((a, b) => a - b);
+const q = (p) => lat[Math.min(lat.length - 1, Math.floor(p * lat.length))]?.toFixed(1);
+const emptyCount = frames.filter((f) => f.empty).length;
+const report = {
+  model: MODEL_KIND,
+  delegate,
+  valid: invalidReason === undefined,
+  invalidReason,
+  spanS: +spanS.toFixed(1),
+  posesPerS: +(frames.length / spanS).toFixed(1),
+  frames: frames.length,
+  emptyFrames: emptyCount,
+  emptyPerMin: +(emptyCount / minutes).toFixed(1),
+  badFrames: frames.filter(bad).length,
+  badPct: frames.length ? +(100 * frames.filter(bad).length / frames.length).toFixed(1) : 0,
+  rawBlackouts: rawBlackouts.length,
+  rawBlackoutsPerMin: +(rawBlackouts.length / minutes).toFixed(1),
+  rawBlackoutsOver133ms: rawBlackouts.filter((d) => d > 133).length,
+  rawBlackoutsOver800ms: rawBlackouts.filter((d) => d > 800).length,
+  longestRawBlackoutMs: rawBlackouts.length ? +Math.max(...rawBlackouts).toFixed(0) : 0,
+  recoveryBlackouts: recoveryBlackouts.length,
+  recoveryBlackoutsPerMin: +(recoveryBlackouts.length / minutes).toFixed(1),
+  recoveryBlackoutsOver133ms: recoveryBlackouts.filter((d) => d > 133).length,
+  longestRecoveryBlackoutMs: recoveryBlackouts.length ? +Math.max(...recoveryBlackouts).toFixed(0) : 0,
+  sustainedLosses: sustainedLosses.length,
+  sustainedLossesPerMin: +(sustainedLosses.length / minutes).toFixed(1),
+  longestSustainedLossMs: sustainedLosses.length ? +Math.max(...sustainedLosses).toFixed(0) : 0,
+  latencyMs: { p50: q(0.5), p90: q(0.9), p99: q(0.99) },
+  ua: navigator.userAgent,
+};
+phaseEl.textContent = `fim — ${MODEL_KIND}`;
+liveEl.textContent = '';
+reportEl.textContent = `${report.valid ? '' : `BENCHMARK INVÁLIDO — NÃO COMPARAR: ${invalidReason}\n`}` +
+  `recuperações/min: ${report.recoveryBlackoutsPerMin}  perdas sustentadas/min: ${report.sustainedLossesPerMin}\n` +
+  `frames vazios/min: ${report.emptyPerMin}  ruins: ${report.badPct}%  poses/s: ${report.posesPerS}  delegate: ${delegate}\n\n` +
+  JSON.stringify(report, null, 2);
+window.DROPOUT_BENCH = report;
+console.log('DROPOUT_BENCH', JSON.stringify(report));
+</script>

@@ -1,3 +1,5 @@
+import type { TrackingState } from '../../cv/protocol';
+
 export type Gait = 'idle' | 'walk' | 'run';
 
 // On the CadenceTracker scale these are about 138 steps/min to start running and 130 to drop back.
@@ -15,7 +17,7 @@ export function nextPace(speed01: number): number {
 }
 
 export type PaceOwner = 'camera' | 'keyboard';
-export interface Pace { owner: PaceOwner; speed01: number; cadenceSpm: number }
+export interface Pace { owner: PaceOwner; speed01: number; cadenceSpm: number; cameraTracking?: TrackingState }
 
 /** A measured step is the player's body asking to drive the run: it hands pace to the camera. */
 export function applyStep(pace: Pace): Pace {
@@ -27,8 +29,15 @@ export function applyStep(pace: Pace): Pace {
  * standstill frames and the residual positive cadence the tracker keeps reporting for a
  * while after the last step — ownership moves on real steps, not on decaying measurements.
  */
-export function applySprint(pace: Pace, event: { speed01: number; cadenceSpm: number }): Pace {
-  return pace.owner === 'camera' ? { ...pace, speed01: event.speed01, cadenceSpm: event.cadenceSpm } : pace;
+export function applySprint(pace: Pace, event: { speed01: number; cadenceSpm: number; trackingState?: TrackingState }): Pace {
+  return pace.owner === 'camera' ? { ...pace, speed01: event.speed01, cadenceSpm: event.cadenceSpm, cameraTracking: event.trackingState } : pace;
+}
+
+const CAMERA_INPUT_STALE_MS = 400;
+
+export function adjudicationDt(pace: Pace, dt: number, cameraInputAgeMs = 0): number {
+  const measuredCameraInput = (pace.cameraTracking === undefined || pace.cameraTracking === 'tracked') && cameraInputAgeMs <= CAMERA_INPUT_STALE_MS;
+  return pace.owner === 'keyboard' || measuredCameraInput ? dt : 0;
 }
 
 const EASE_RATE = 6;

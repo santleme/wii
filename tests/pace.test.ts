@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applySprint, applyStep, easeSpeed, gaitFor, type Gait, nextPace, type Pace, stumble } from '../src/games/track/gait';
+import { adjudicationDt, applySprint, applyStep, easeSpeed, gaitFor, type Gait, nextPace, type Pace, stumble } from '../src/games/track/gait';
 import type { CadenceResult } from '../src/kinematics/cadenceTracker';
 import { poseWithHipBounce } from './fixtures/syntheticPose';
 import { cadenceHarness } from './fixtures/torsoHarness';
@@ -216,6 +216,23 @@ describe('pace ownership between camera and keyboard', () => {
     pace = press(pace);
     pace = applySprint(pace, still);
     expect(pace.speed01).toBe(0);
+  });
+
+  it('freezes adjudication time while camera input is coasting, but not for keyboard ownership', () => {
+    const coasting = applySprint(
+      { owner: 'camera', speed01: 0.8, cadenceSpm: 150 },
+      { speed01: 0.4, cadenceSpm: 90, trackingState: 'degraded' },
+    );
+    expect(coasting.speed01).toBe(0.4);
+    expect(adjudicationDt(coasting, 1 / 60)).toBe(0);
+
+    const measured = applySprint(coasting, { speed01: 0.7, cadenceSpm: 140, trackingState: 'tracked' });
+    expect(adjudicationDt(measured, 1 / 60)).toBeCloseTo(1 / 60);
+    expect(adjudicationDt(measured, 1 / 60, 401)).toBe(0);
+    expect(adjudicationDt(measured, 1 / 60, 399)).toBeCloseTo(1 / 60);
+
+    const keyboard: Pace = { owner: 'keyboard', speed01: 0.8, cadenceSpm: 0, cameraTracking: 'degraded' };
+    expect(adjudicationDt(keyboard, 1 / 60)).toBeCloseTo(1 / 60);
   });
 });
 

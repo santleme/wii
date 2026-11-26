@@ -375,7 +375,11 @@ describe('action pipeline tracking gate', () => {
     driveBounce(pipeline, profile, 66, 1046);
     const active = pipeline.update(poseWithHipBounce(1079, 0), profile);
     expect(active.controls.sprintSpeed01).toBeGreaterThan(0);
-    const lost = [1110, 1143, 1176, 1209].map((time) => pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile)).at(-1)!;
+    // A sustained blackout — past the gate's 800 ms window — ends in 'lost' with the
+    // sprint fully stopped (the coast has long decayed by then).
+    const blackout = [];
+    for (let time = 1112; time <= 2000; time += 33) blackout.push(pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile));
+    const lost = blackout.at(-1)!;
     expect(lost.controls).toMatchObject({ sprintSpeed01: 0, cadenceSpm: 0, trackingState: 'lost' });
   });
 
@@ -387,11 +391,75 @@ describe('action pipeline tracking gate', () => {
     const profile = calibration();
     driveBounce(pipeline, profile, 66, 1046);
     pipeline.update(poseWithHipBounce(1079, 0), profile);
-    const after = [1112, 1145].flatMap((time) => {
+    const after = [1112, 1145, 1178, 1211, 1244, 2000].flatMap((time) => {
       if (cause === 'reset') return pipeline.reset();
       return pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile).events;
     });
-    expect(after.filter((event) => event.type === 'sprint')).toMatchObject([{ speed01: 0, cadenceSpm: 0, trackingState: state }]);
+    const stops = after.filter((event) => event.type === 'sprint' && event.speed01 === 0);
+    expect(stops).toHaveLength(1);
+    // The stop rides whatever tracking state the frame carries when the coast runs out —
+    // degraded early in the blackout, lost once the blackout is sustained.
+    if (cause === 'reset') expect(stops[0]).toMatchObject({ speed01: 0, cadenceSpm: 0, trackingState: state });
+    else expect(stops[0]?.trackingState).not.toBe('tracked');
+  });
+
+  it('coasts the sprint with damping through a brief blackout instead of dropping it in a step', () => {
+    const pipeline = new ActionPipeline();
+    const profile = calibration();
+    driveBounce(pipeline, profile, 66, 1046);
+    const active = pipeline.update(poseWithHipBounce(1079, 0), profile);
+    const speedBefore = active.controls.sprintSpeed01;
+    expect(speedBefore).toBeGreaterThan(0.3);
+    // A ~200 ms blur burst: the speed must decay smoothly, never hitting zero — and no
+    // stop event may fire.
+    const burst = [1112, 1145, 1178, 1211, 1244, 1277].map((time) => pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile));
+    const speeds = burst.map((result) => result.controls.sprintSpeed01);
+    expect(speeds.every((speed) => speed > 0)).toBe(true);
+    expect(speeds[0]!).toBeLessThan(speedBefore);
+    expect(speeds.at(-1)!).toBeLessThan(speeds[0]!);
+    // Half-life 150 ms: ~230 ms into the blackout the carried speed sits at roughly a third.
+    expect(speeds.at(-1)!).toBeGreaterThan(speedBefore * 0.2);
+    expect(speeds.at(-1)!).toBeLessThan(speedBefore * 0.6);
+    expect(burst.flatMap((result) => result.events).filter((event) => event.type === 'sprint' && event.speed01 === 0)).toHaveLength(0);
+    expect(burst.every((result) => result.controls.trackingState === 'degraded')).toBe(true);
+  });
+
+  it('keeps the cadence memory through a burst: the run re-engages within a few frames of return', () => {
+    const pipeline = new ActionPipeline();
+    const profile = calibration();
+    const hz = 150 / 60;
+    const bounceAt = (time: number) => poseWithHipBounce(time, 0.04 * Math.sin((2 * Math.PI * hz * (time - 66)) / 1000) * 0.4);
+    driveBounce(pipeline, profile, 66, 1046);
+    pipeline.update(bounceAt(1079), profile);
+    // The player keeps running through a ~300 ms blackout the camera cannot see.
+    for (let time = 1112; time <= 1400; time += 33) pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile);
+    // Detectors were never reset: the cadence memory is warm, so measured cadence flows
+    // within the first tracked frames — a from-scratch restart would emit nothing for
+    // ~2 step intervals (~800 ms at 150 spm). The median-of-three then purges the
+    // blackout-stretched intervals over the next few steps, converging back to full pace.
+    const early = [1433, 1466, 1499, 1532].map((time) => pipeline.update(bounceAt(time), profile));
+    expect(early.at(-1)!.controls.trackingState).toBe('tracked');
+    expect(early.at(-1)!.controls.cadenceSpm).toBeGreaterThan(40);
+    const settled = [];
+    for (let time = 1565; time <= 2400; time += 33) settled.push(pipeline.update(bounceAt(time), profile));
+    expect(Math.max(...settled.map((result) => result.controls.sprintSpeed01))).toBeGreaterThan(0.4);
+  });
+
+  it('ends the coast in a single clean stop when the blackout outlasts the timeout', () => {
+    const pipeline = new ActionPipeline();
+    const profile = calibration();
+    driveBounce(pipeline, profile, 66, 1046);
+    pipeline.update(poseWithHipBounce(1079, 0), profile);
+    // Beyond the 600 ms coast timeout the runner must be fully stopped — and the zero
+    // emitted exactly once even though bad frames keep coming.
+    const blackout = [];
+    for (let time = 1112; time <= 1750; time += 33) blackout.push(pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile));
+    const stops = blackout.flatMap((result) => result.events).filter((event) => event.type === 'sprint' && event.speed01 === 0);
+    expect(stops).toHaveLength(1);
+    expect(blackout.at(-1)!.controls.sprintSpeed01).toBe(0);
+    // 600+ ms is still inside the gate's 800 ms blackout window: degraded, not lost —
+    // the detectors survive even this.
+    expect(blackout.at(-1)!.controls.trackingState).toBe('degraded');
   });
 
   it('keeps cadence running when calibration is removed mid-stream', () => {
@@ -557,8 +625,11 @@ describe('mão da raquete', () => {
     pipeline.update(pose(99, { wristLateral: -0.15, leftWristLateral: 0.15 }), profile);
     const held = pipeline.update(pose(132, { wristLateral: 0.05, leftWristLateral: 0.35 }), profile);
     expect(held.events.filter((event) => event.type === 'swing')).toHaveLength(0);
-    // Left wrist vanishes: once its gate is lost the pending arc dies and the held swing emits.
-    const swings = [165, 198, 231, 264]
+    // Left wrist vanishes for good: once its gate crosses the sustained-blackout window
+    // into lost the pending arc dies and the held swing emits.
+    const frames = [];
+    for (let time = 165; time <= 1100; time += 33) frames.push(time);
+    const swings = frames
       .flatMap((time) => pipeline.update(withWorldConfidence(pose(time, { wristLateral: 0.05 }), 15, 0, 0), profile).events)
       .filter((event) => event.type === 'swing');
     expect(swings).toHaveLength(1);
@@ -610,7 +681,8 @@ describe('mão da raquete', () => {
     expect(held.events.filter((event) => event.type === 'swing')).toHaveLength(0);
     // Both wrists vanish: the held swing's own basis is gone — it must be dropped, not released.
     const lost = (time: number) => withWorldConfidence(withWorldConfidence(pose(time, { wristLateral: 0.05 }), 15, 0, 0), 16, 0, 0);
-    const swings = [165, 198, 231, 264].flatMap((time) => pipeline.update(lost(time), profile).events).filter((event) => event.type === 'swing');
+    const frames = Array.from({ length: 10 }, (_, index) => 165 + index * 33);
+    const swings = frames.flatMap((time) => pipeline.update(lost(time), profile).events).filter((event) => event.type === 'swing');
     expect(swings).toHaveLength(0);
   });
 });

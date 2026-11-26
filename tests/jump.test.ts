@@ -149,6 +149,34 @@ describe('JumpDetector (adaptive baseline)', () => {
     expect(events[1]! - events[0]!).toBeGreaterThan(900);
   });
 
+  it('re-arms through tracking micro-oscillation that never dips under the rearm band', () => {
+    const detector = new JumpDetector();
+    arm(detector);
+    // First takeoff at t=2000; from t=3000 on the signal hovers at rise ≈0.07 — a wobble
+    // pinned just over the 0.05 rearm band, so the band itself can never free the detector.
+    // The airborne bound re-arms it anyway and the second takeoff at t=4200 still fires.
+    const twoJumps = (timeMs: number) =>
+      jumpProfile(0.25)(timeMs) + jumpProfile(0.25)(timeMs - 2200) + (timeMs > 3000 ? 0.07 : 0);
+    const events = feed(detector, twoJumps, 30, 8000);
+    expect(events).toHaveLength(2);
+    expect(events[1]).toBeGreaterThan(4200);
+  });
+
+  it('re-arms at the airborne timeout when rise never returns below the band', () => {
+    const detector = new JumpDetector();
+    arm(detector);
+    const update = (timestampMs: number, rise: number, velocityUp: number) => detector.update({
+      timestampMs, rise, velocityUp, oscillationAmplitude: 0, sustainedOscillationAmplitude: 0,
+    });
+
+    expect(update(2000, 0.12, 2)).toBe(false);
+    expect(update(2033, 0.12, 2)).toBe(true);
+    for (let time = 2066; time < 2733; time += 33) expect(update(time, 0.07, 0)).toBe(false);
+    expect(update(2733, 0.07, 0)).toBe(false);
+    expect(update(2766, 0.12, 2)).toBe(false);
+    expect(update(2799, 0.12, 2)).toBe(true);
+  });
+
   it.each([15, 30, 60])('fires the same jump once at %i fps', (fps) => {
     expect(feedChain(jumpProfile(0.3), { fps })).toHaveLength(1);
   });

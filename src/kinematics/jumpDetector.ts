@@ -36,6 +36,13 @@ const ARM_DWELL_MS = 160;
  * amplitude+velocity gates are what actually discriminate jumps from bounce.
  */
 const REARM_RISE_TORSO = 0.05;
+/**
+ * Hard bound on time airborne. A real takeoff falls back under the rearm band well inside
+ * this window; rise held above the band past it is stale signal — tracking micro-oscillation
+ * hovering over the threshold — not a flight, so the detector re-arms anyway instead of
+ * swallowing every later jump.
+ */
+const MAX_AIRBORNE_MS = 700;
 
 /**
  * Jump detection against the torso channel's adaptive baseline — no calibration involved.
@@ -81,7 +88,7 @@ export class JumpDetector {
       this.risingSince = undefined;
       fired = true;
     }
-    if (this.airborne && rise <= REARM_RISE_TORSO) this.airborne = false;
+    if (this.airborne && (rise <= REARM_RISE_TORSO || timestampMs - this.lastJumpAt >= MAX_AIRBORNE_MS)) this.airborne = false;
     return fired;
   }
 

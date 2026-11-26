@@ -6,6 +6,20 @@ import { SWING_MAX_DURATION_MS, SwingDetector, type SwingSignal } from './swingD
 import { TorsoVerticalChannel } from './torsoVertical';
 import { TrackingGate } from './trackingGate';
 
+/**
+ * Coasting through a tracking blackout, after the Meta First Steps hand-tracking algorithm:
+ * never drop the input in a step function and never interpolate toward bad data — carry the
+ * last measured speed forward with damping instead. The half-life is short because running
+ * in place is not ballistic: 150 ms halves the carried speed, so after the 600 ms timeout
+ * the runner has glided to a stop rather than frozen mid-stride. Detectors keep their state
+ * through the whole window — only a sustained 'lost' (the gate's own 800 ms blackout) resets
+ * them, so a blur burst no longer wipes the cadence memory the run depends on.
+ */
+const COAST_TIMEOUT_MS = 600;
+const COAST_HALF_LIFE_MS = 150;
+/** Below this the carried speed is indistinguishable from stopped; the coast ends in a clean zero. */
+const COAST_MIN_SPEED01 = 0.02;
+
 export class ActionPipeline {
   private readonly bodyGate = new TrackingGate();
   /** One gate and one vertical channel for the torso core: cadence and jump read the same frame's sample. */
@@ -25,6 +39,8 @@ export class ActionPipeline {
   private nextId = 1;
   /** True while the last emitted sprint event left the game moving. */
   private sprinting = false;
+  /** Last moving sprint measurement and when it was taken — the input coasting decays from. */
+  private coast?: { speed01: number; cadenceSpm: number; measuredAt: number };
 
   update(snapshot: PoseSnapshot, calibration?: CalibrationProfile): { snapshot: PoseSnapshot; events: SportActionEvent[]; controls: ContinuousControls; kinematicsMs: number } {
     const start = performance.now();
@@ -43,14 +59,24 @@ export class ActionPipeline {
       const base = this.eventBase(snapshot, torsoTracking.confidence);
       events.push({ ...base, id: this.nextId++, type: 'sprint', speed01: cadence.speed01, cadenceSpm: cadence.cadenceSpm });
       this.sprinting = cadence.speed01 > 0;
+      this.coast = cadence.speed01 > 0
+        ? { speed01: cadence.speed01, cadenceSpm: cadence.cadenceSpm, measuredAt: snapshot.timestampMs }
+        : undefined;
       if (cadence.step) events.push({ ...base, id: this.nextId++, type: 'step', side: cadence.step });
       if (jumped) events.push({ ...base, id: this.nextId++, type: 'jump' });
     } else {
-      events.push(...this.stopSprint(snapshot.timestampMs, torsoTracking.confidence, torsoTracking.state));
+      const coasted = this.coastSprint(snapshot, torsoTracking);
+      if (coasted) {
+        events.push(coasted);
+        controls = { sprintSpeed01: coasted.speed01, cadenceSpm: coasted.cadenceSpm, trackingState: torsoTracking.state };
+      } else {
+        events.push(...this.stopSprint(snapshot.timestampMs, torsoTracking.confidence, torsoTracking.state));
+      }
       if (torsoTracking.state === 'lost') {
         this.cadence.reset();
         this.jump.reset();
         this.torsoChannel.reset();
+        this.coast = undefined;
       }
     }
 
@@ -75,13 +101,13 @@ export class ActionPipeline {
         events.push({ ...this.eventBase(snapshot, tracking.confidence), id: this.nextId++, type: 'swing-start', hand });
       }
       const swing = output?.kind === 'confirmed' ? output : undefined;
-      return { hand, lost: tracking.state === 'lost', swing };
+      return { hand, tracked: tracking.state === 'tracked', swing };
     });
-    // A held swing whose own wrist went lost is stale: discard it rather than release a
-    // "tracked" hit into a dead pose. Losing only the rival is different — it resolves the
-    // arbitration and the held swing goes out.
+    // A held swing whose own wrist is no longer tracked is stale: discard it rather than
+    // release a "tracked" hit into a dead pose. Losing only the rival is different — it
+    // resolves the arbitration and the held swing goes out.
     const held = this.heldSwing;
-    if (held && results.some((result) => result.hand === held.hand && result.lost)) this.heldSwing = undefined;
+    if (held && results.some((result) => result.hand === held.hand && !result.tracked)) this.heldSwing = undefined;
     // The strongest swing wins, not the first to confirm: confirmations inside the 400 ms
     // refractory are discarded at admission, and while a wrist still has a swing in flight
     // the rival's confirmation waits for it — bounded by the rival's own max duration.
@@ -108,11 +134,35 @@ export class ActionPipeline {
     return { snapshot: current, events, controls, kinematicsMs: performance.now() - start };
   }
 
+  /**
+   * The sprint event a blackout frame still owes the game: the last measured speed carried
+   * forward with exponential damping, or nothing once the coast has run out — the final
+   * stop is emitted by the caller through stopSprint, exactly once.
+   */
+  private coastSprint(snapshot: PoseSnapshot, torsoTracking: { state: TrackingState; confidence: number }): (SportActionEvent & { type: 'sprint' }) | undefined {
+    if (!this.coast || !this.sprinting) return undefined;
+    const sinceMeasured = snapshot.timestampMs - this.coast.measuredAt;
+    const speed01 = this.coast.speed01 * 0.5 ** (sinceMeasured / COAST_HALF_LIFE_MS);
+    if (sinceMeasured > COAST_TIMEOUT_MS || speed01 < COAST_MIN_SPEED01) return undefined;
+    const cadenceSpm = this.coast.cadenceSpm * 0.5 ** (sinceMeasured / COAST_HALF_LIFE_MS);
+    return {
+      timestampMs: snapshot.timestampMs,
+      confidence: torsoTracking.confidence,
+      trackingState: torsoTracking.state,
+      source: 'cv',
+      id: this.nextId++,
+      type: 'sprint',
+      speed01,
+      cadenceSpm,
+    };
+  }
+
   /** Returns the events the game still needs, such as stopping a sprint in progress. */
   reset(): SportActionEvent[] {
     const stopped = this.stopSprint(performance.now(), 0, 'lost');
     this.bodyGate.reset(); this.torsoGate.reset(); this.laneGate.reset(); this.swings.forEach(({ gate }) => { gate.reset(); });
     this.resetDetectors();
+    this.coast = undefined;
     return stopped;
   }
 
