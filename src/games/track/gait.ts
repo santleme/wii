@@ -11,9 +11,16 @@ export function gaitFor(speed01: number, previous: Gait): Gait {
   return speed01 >= (previous === 'run' ? RUN_OFF_SPEED : RUN_ON_SPEED) ? 'run' : 'walk';
 }
 
+/**
+ * Keyboard pace steps, on the gaitFor scale: the walk step stays under RUN_OFF_SPEED, so it
+ * reads as 'walk' from any gait, and the run step clears RUN_ON_SPEED, so it reads as 'run'.
+ */
+export const KEYBOARD_WALK_SPEED = 0.3;
+export const KEYBOARD_RUN_SPEED = 0.8;
+
 /** Keyboard pace cycle: stopped → walking → running → stopped. */
 export function nextPace(speed01: number): number {
-  return speed01 === 0 ? 0.3 : speed01 < RUN_ON_SPEED ? 0.8 : 0;
+  return speed01 === 0 ? KEYBOARD_WALK_SPEED : speed01 < RUN_ON_SPEED ? KEYBOARD_RUN_SPEED : 0;
 }
 
 export type PaceOwner = 'camera' | 'keyboard';

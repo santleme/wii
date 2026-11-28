@@ -26,8 +26,8 @@ export class RunGate {
   /** True while the latest tracking label is 'SEM POSE'; `lostFor` times that continuous window. */
   private poseMissing = false;
   private lostFor = 0;
-  /** The phase the pause interrupted, restored verbatim when the player comes back. */
-  private pausedFrom: RunPhase = 'running';
+  /** The phase the pause interrupted, restored verbatim when the player comes back. Never 'paused' itself. */
+  private pausedFrom: 'countdown' | 'running' = 'running';
 
   get phase(): RunPhase {
     return this.current;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adjudicationDt, applySprint, applyStep, easeSpeed, gaitFor, type Gait, nextPace, type Pace, stumble } from '../src/games/track/gait';
+import { adjudicationDt, applySprint, applyStep, easeSpeed, gaitFor, type Gait, KEYBOARD_RUN_SPEED, KEYBOARD_WALK_SPEED, nextPace, type Pace, stumble } from '../src/games/track/gait';
 import type { CadenceResult } from '../src/kinematics/cadenceTracker';
 import { poseWithHipBounce } from './fixtures/syntheticPose';
 import { cadenceHarness } from './fixtures/torsoHarness';
@@ -161,10 +161,17 @@ describe('pace from torso vertical oscillation', () => {
   });
 
   it('cycles stopped, walking and running on distinct key presses', () => {
-    expect(nextPace(0)).toBe(0.3);
-    expect(nextPace(0.3)).toBe(0.8);
-    expect(nextPace(0.8)).toBe(0);
+    expect(nextPace(0)).toBe(KEYBOARD_WALK_SPEED);
+    expect(nextPace(KEYBOARD_WALK_SPEED)).toBe(KEYBOARD_RUN_SPEED);
+    expect(nextPace(KEYBOARD_RUN_SPEED)).toBe(0);
     expect(nextPace(0.64)).toBe(0);
+  });
+
+  it('keeps the keyboard steps inside their gait bands', () => {
+    for (const previous of ['idle', 'walk', 'run'] as const) {
+      expect(gaitFor(KEYBOARD_WALK_SPEED, previous)).toBe('walk');
+      expect(gaitFor(KEYBOARD_RUN_SPEED, previous)).toBe('run');
+    }
   });
 });
 

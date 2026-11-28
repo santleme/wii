@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { HurdleFlow, type HurdleBody, MAX_SPAWN_DISTANCE, MIN_SPAWN_DISTANCE, RAMP_DISTANCE, RUNNER_Z, spawnSpacing } from '../src/games/track/hurdleFlow';
 
-const hurdle = (lane: number, z: number): HurdleBody => ({ lane, z, passed: false });
+const hurdle = (lane: number, z: number): HurdleBody => ({ kind: 'hurdle', lane, z, passed: false });
 
 describe('hurdle flow', () => {
   it('judges a hurdle only when it crosses the runner plane, exactly once', () => {

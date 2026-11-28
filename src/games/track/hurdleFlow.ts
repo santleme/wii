@@ -1,7 +1,7 @@
 export type ItemKind = 'hurdle' | 'coin';
 /** Hurdles end up `cleared` (jumped), `dodged` (passed in another lane) or `hit`; coins end up `collected` or `missed`. */
 export type Outcome = 'cleared' | 'dodged' | 'hit' | 'collected' | 'missed';
-export interface HurdleBody { kind?: ItemKind; lane: number; z: number; passed: boolean }
+export interface HurdleBody { kind: ItemKind; lane: number; z: number; passed: boolean }
 export interface HurdleStep<T extends HurdleBody> { judged: { hurdle: T; outcome: Outcome }[]; despawned: T[]; spawn: boolean }
 
 /** The runner holds this depth; a hurdle is judged only once it crosses this plane. */

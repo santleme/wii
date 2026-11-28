@@ -72,7 +72,7 @@ export class TrackGame {
   private readonly itemAssets = new ItemAssets();
   private readonly loop: GameLoop;
   private readonly hudTimer: number;
-  private lane = 0;
+  private lane: Lane = 0;
   private cameraLaneZone: -1 | 0 | 1 | undefined;
   /** Speed asked for by the player and who set it; `shownSpeed` eases toward it. */
   private pace: Pace = { owner: 'camera', speed01: 0, cadenceSpm: 0 };
@@ -218,8 +218,8 @@ export class TrackGame {
     if (!['arrowleft', 'arrowright', 'arrowup', 'arrowdown', ' ', 'a', 'd', 'w', 's'].includes(pressed)) return;
     if (this.result || this.gate.resumeByKey()) return;
     if (this.gate.phase !== 'running' && pressed !== 'arrowdown' && pressed !== 's') return;
-    if (key === 'ArrowLeft' || key.toLowerCase() === 'a') this.lane = Math.max(-1, this.lane - 1);
-    if (key === 'ArrowRight' || key.toLowerCase() === 'd') this.lane = Math.min(1, this.lane + 1);
+    if (key === 'ArrowLeft' || key.toLowerCase() === 'a') this.lane = Math.max(-1, this.lane - 1) as Lane;
+    if (key === 'ArrowRight' || key.toLowerCase() === 'd') this.lane = Math.min(1, this.lane + 1) as Lane;
     if (key === ' ' || key === 'ArrowUp' || key.toLowerCase() === 'w') { this.jumpTime = JUMP_DURATION_S; this.jumpSource = 'keyboard'; }
     if (key === 'ArrowDown' || key.toLowerCase() === 's') {
       // Keyboard cycles stopped → walking → running and keeps the pick until the player steps on camera.
