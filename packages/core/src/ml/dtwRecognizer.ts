@@ -194,7 +194,9 @@ export class DtwGestureRecognizer {
           if (distance !== undefined && distance < bestDistance) bestDistance = distance;
         }
       }
-      distances.set(label, bestDistance);
+      // No finite distance means no candidate matched this label at all: omit it, so the
+      // map never leaks Infinity into recognize()'s ranking or the null-separation gate.
+      if (Number.isFinite(bestDistance)) distances.set(label, bestDistance);
     }
     return distances;
   }
