@@ -16,7 +16,7 @@ import { visibleImagePoint } from './kinematics/math';
 import type { GestureSample } from './games/core/restartGesture';
 import { ProceduralAudio } from './games/audio';
 import { CameraPip } from './ui/CameraPip';
-import { GameCanvas, type GameEngineHandle, type IronManResult, type Sport } from './ui/GameCanvas';
+import { GameCanvas, type GameEngineHandle, type Sport } from './ui/GameCanvas';
 import type { Goal } from './games/athletics/race';
 import { HandCursor } from './ui/HandCursor';
 import { HandDebugOverlay } from './ui/HandDebugOverlay';
@@ -25,11 +25,11 @@ import { HAND_IDLE, type HandCursorInput } from './ui/handCursorTypes';
 import type { CarouselStepResult } from './ui/carouselController';
 import { drawPose } from './ui/PoseOverlay';
 import { EXIT_DODGE_SW } from './kinematics/postureSignals';
-import { HomeMenu } from './ui/WiiMenu';
+import { GamesMenu, HomeMenu } from './ui/WiiMenu';
 import { WiiSplash } from './ui/WiiSplash';
 import './arena.css';
 
-type Screen = 'home' | 'play' | 'summary';
+type Screen = 'home' | 'games' | 'play';
 type VisionMode = 'hand' | 'pose';
 
 const ACTIVITY_LABEL: Record<ActivityKind, string> = {
@@ -40,7 +40,7 @@ const ACTIVITY_LABEL: Record<ActivityKind, string> = {
 };
 const MUTE_STORAGE_KEY = 'wii-web-sports.muted.v1';
 
-const inHandMenu = (screen: Screen) => screen !== 'play';
+const inHandMenu = (screen: Screen) => screen === 'home' || screen === 'games';
 const modeForScreen = (screen: Screen): VisionMode => (inHandMenu(screen) ? 'hand' : 'pose');
 
 function readMutedPreference(): boolean {
@@ -63,7 +63,6 @@ export default function App({ exit }: { exit?: ReactNode }) {
   const [splash, setSplash] = useState(true);
   const [screen, setScreen] = useState<Screen>('home');
   const [sport, setSport] = useState<Sport>('athletics');
-  const [ironResults, setIronResults] = useState<IronManResult[] | null>(null);
   const [goal, setGoal] = useState<Goal>(100);
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraStatus, setCameraStatus] = useState('Permissão da câmera ainda não solicitada');
@@ -87,7 +86,11 @@ export default function App({ exit }: { exit?: ReactNode }) {
   sportRef.current = sport;
   const screenRef = useRef(screen);
   screenRef.current = screen;
-  const activeVisionModeRef = useRef<VisionMode>('pose');
+  // Transition memory for activateVisionMode only: the mode the last activation
+  // switched to. The authority for "which mode should be live" is always the
+  // derivation modeForScreen(screenRef.current) — this cache is written solely
+  // inside activateVisionMode and read nowhere else.
+  const lastActivatedModeRef = useRef<VisionMode>('pose');
   const visionActivationRef = useRef(0);
   const captureStartedRef = useRef<{ cameraAttempt: number; visionActivation: number } | undefined>(undefined);
   const profileRef = useRef<CalibrationProfile | undefined>(undefined);
@@ -164,16 +167,15 @@ export default function App({ exit }: { exit?: ReactNode }) {
     if (videoRef.current) videoRef.current.srcObject = null;
     setCameraOn(false);
     setTracking('SEM POSE');
-    engineRef.current?.setTracking?.('SEM POSE');
     setCameraStatus('Câmera desligada');
     publishHandInput(HAND_IDLE);
     handDetectorRef.current.reset();
     for (const event of pipelineRef.current.reset(performance.now())) dispatchEvent(event);
     engineRef.current?.resetLaneZone?.();
-    engineRef.current?.setGuard?.(undefined, null);
-    engineRef.current?.setDuck?.(undefined, null);
-    engineRef.current?.setDepthMove?.(undefined, null);
-    engineRef.current?.setDepthSpeed?.(undefined, null);
+    engineRef.current?.setGuard?.(undefined);
+    engineRef.current?.setDuck?.(undefined);
+    engineRef.current?.setDepthMove?.(undefined);
+    engineRef.current?.setDepthSpeed?.(undefined);
     engineRef.current?.setLateralDash?.(undefined);
     contextRef.current.reset();
     resetCalibration();
@@ -221,18 +223,21 @@ export default function App({ exit }: { exit?: ReactNode }) {
   }, [screen, sport, cameraOn, dispatchEvent, resetCalibration, finishRecording]);
 
   const activateVisionMode = useCallback((next: VisionMode): VisionMode | undefined => {
-    const previous = activeVisionModeRef.current;
+    const previous = lastActivatedModeRef.current;
     if (previous === next) return undefined;
-    activeVisionModeRef.current = next;
+    lastActivatedModeRef.current = next;
     visionActivationRef.current += 1;
     captureStartedRef.current = undefined;
     return previous;
   }, []);
 
+  // Currency is attempt + activation + the derived mode. A stored-mode conjunct
+  // could never disagree: the ref only changes inside activateVisionMode, which
+  // bumps the activation in the same step, and a screen change is already caught
+  // by the derivation over screenRef (updated during render, before any effect).
   const isCurrentVisionActivation = useCallback((attempt: number, activation: number, mode: VisionMode) =>
     cameraAttemptRef.current === attempt &&
     visionActivationRef.current === activation &&
-    activeVisionModeRef.current === mode &&
     modeForScreen(screenRef.current) === mode,
   []);
 
@@ -280,9 +285,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
       const current = result.snapshot;
       const decision = contextRef.current.update(current, profileRef.current);
       const activity = decision.confidence01 > 0.4 ? ` · ${ACTIVITY_LABEL[decision.activity]}` : '';
-      const trackingLabel = current.trackingState === 'tracked' ? `TRACKING${activity}` : current.trackingState === 'lost' ? 'SEM POSE' : 'PROCURANDO';
-      engineRef.current?.setPoseTracking?.(trackingLabel, raw.timestampMs);
-      setTracking(trackingLabel);
+      setTracking(current.trackingState === 'tracked' ? `TRACKING${activity}` : current.trackingState === 'lost' ? 'SEM POSE' : 'PROCURANDO');
       drawPose(overlayRef.current, videoRef.current, current);
       engineRef.current?.setLaneZone?.(result.controls.laneZone);
       engineRef.current?.setEffort?.(result.rawEffort, result.effortSampleAtMs);
@@ -296,11 +299,11 @@ export default function App({ exit }: { exit?: ReactNode }) {
       engineRef.current?.setTossHand?.(raisedTossHand(current), raw.timestampMs);
       engineRef.current?.setArmMotions?.(result.armMotions);
       engineRef.current?.setSwingTracking?.(result.swingTracking);
-      engineRef.current?.setDodgeZone?.(result.controls.dodgeZone, raw.timestampMs);
-      engineRef.current?.setGuard?.(result.controls.guard, raw.timestampMs);
-      engineRef.current?.setDuck?.(result.controls.duck, raw.timestampMs);
-      engineRef.current?.setDepthMove?.(result.controls.ringDepthMove, raw.timestampMs);
-      engineRef.current?.setDepthSpeed?.(result.controls.ringDepth01, raw.timestampMs);
+      engineRef.current?.setDodgeZone?.(result.controls.dodgeZone);
+      engineRef.current?.setGuard?.(result.controls.guard);
+      engineRef.current?.setDuck?.(result.controls.duck);
+      engineRef.current?.setDepthMove?.(result.controls.ringDepthMove);
+      engineRef.current?.setDepthSpeed?.(result.controls.ringDepth01);
       engineRef.current?.setLateralDash?.(result.controls.lateralDash);
       for (const event of result.events) dispatchEvent(event);
     },
@@ -320,7 +323,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
         }
       },
     });
-    if (stale() || !handClient.isReady || !streamRef.current || activeVisionModeRef.current !== 'hand') return;
+    if (stale() || !handClient.isReady || !streamRef.current) return;
     handClient.beginCapture(video, (snapshot, aspectY) => {
       if (stale()) return;
       const primary = snapshot.hands[0];
@@ -373,7 +376,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
         poseCallbacksRef.current?.onPose(raw);
       },
     });
-    if (stale() || !poseClient.isReady || !streamRef.current || activeVisionModeRef.current !== 'pose') return;
+    if (stale() || !poseClient.isReady || !streamRef.current) return;
     poseClient.beginCapture(video, {
       onStatus: (status, detail) => {
         if (stale()) return;
@@ -516,61 +519,31 @@ export default function App({ exit }: { exit?: ReactNode }) {
     setScreen('play');
   };
 
-  const exitGame = () => {
-    setIronResults(null);
-    setScreen('home');
-  };
-  const startIronMan = () => {
-    setIronResults([]);
-    play('athletics', 100);
-  };
-  const finishIronStage = (result: IronManResult) => {
-    if (!ironResults) return;
-    const results = [...ironResults, result];
-    setIronResults(results);
-    if (result.sport === 'athletics') play('tennis');
-    else if (result.sport === 'tennis') play('boxing');
-    else setScreen('summary');
-  };
-
-  const menuBackRef = useRef<(() => void) | undefined>(undefined);
-  const handBack = useCallback(() => menuBackRef.current?.(), []);
+  const handBack = useCallback(() => {
+    if (screenRef.current === 'games') setScreen('home');
+  }, []);
 
   const menu = inHandMenu(screen);
 
   return <div className="stage">
-    {screen === 'play' && <GameCanvas key={`${sport}-${goal}`} sport={sport} goal={goal} onEngine={onEngine} tracking={tracking} audio={audioRef.current} crossedPose={crossedPoseRef} onExit={exitGame} ironMan={ironResults ? { onComplete: finishIronStage } : undefined} onStrokeTravel={onStrokeTravel} onPunchTravel={onPunchTravel} />}
+    {screen === 'play' && <GameCanvas key={`${sport}-${goal}`} sport={sport} goal={goal} onEngine={onEngine} tracking={tracking} audio={audioRef.current} crossedPose={crossedPoseRef} onExit={() => setScreen('games')} onStrokeTravel={onStrokeTravel} onPunchTravel={onPunchTravel} />}
     {screen === 'home' && (
       <HomeMenu
         exit={exit}
-        onPick={(next, distance) => { setIronResults(null); play(next, distance); }}
-        onIronMan={startIronMan}
-        backRef={menuBackRef}
+        onGames={() => setScreen('games')}
         handInputRef={handInputRef}
         rotationGateRef={homeRotationGateRef}
         carouselDebugRef={carouselDebugRef}
       />
     )}
+    {screen === 'games' && <GamesMenu onHome={() => setScreen('home')} onPick={play} />}
 
-    {screen === 'summary' && ironResults && <section className="menu iron-summary" aria-label="Resumo do Iron Man">
-      <div className="iron-summary-card">
-        <span className="iron-eyebrow">Wii Sports</span>
-        <h1>Iron Man concluído!</h1>
-        <p>Você completou as três modalidades.</p>
-        <ol>{ironResults.map((result) => <li key={result.sport}>
-          <strong>{result.sport === 'athletics' ? 'Atletismo · 100 m' : result.sport === 'tennis' ? 'Tênis' : 'Boxe'}</strong>
-          <span>{result.detail}</span>
-        </li>)}</ol>
-        <button type="button" className="wii-btn" onClick={exitGame}>Voltar ao menu</button>
-      </div>
-    </section>}
-    {screen === 'play' && ironResults && <div className="iron-progress">IRON MAN · ETAPA {ironResults.length + 1} DE 3</div>}
     {screen === 'play' && headCut && <div className="framing-hint" role="alert">Sua cabeça saiu do quadro · incline a câmera para cima ou afaste-se</div>}
     {screen === 'play' && keepPhotos && <div className="photo-notice">● guardando fotos dos últimos 20 s · E salva</div>}
     {recordingPrompt && <div className="recording-prompt" role="status">● {recordingPrompt}</div>}
 
     {screen === 'play' && <div className="hud-dock">
-      <button type="button" className="dock-btn" onClick={exitGame}>{ironResults ? '‹ Sair do Iron Man' : '‹ Menu'}</button>
+      <button type="button" className="dock-btn" onClick={() => setScreen('games')}>‹ Jogos</button>
       <button type="button" className="dock-btn round" onClick={toggleMute} title={muted ? 'Áudio desligado' : 'Áudio ligado'}>{muted ? '×' : '♫'}</button>
     </div>}
 

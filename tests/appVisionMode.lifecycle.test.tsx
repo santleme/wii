@@ -100,7 +100,9 @@ vi.mock('../src/ui/GameCanvas', () => ({ GameCanvas: () => null }));
 vi.mock('../src/ui/WiiMenu', async () => {
   const React = await import('react');
   return {
-    HomeMenu: ({ onPick }: { onPick(sport: 'athletics'): void }) =>
+    HomeMenu: ({ onGames }: { onGames(): void }) =>
+      React.createElement('button', { 'data-testid': 'home-to-games', onClick: onGames }),
+    GamesMenu: ({ onPick }: { onPick(sport: 'track' | 'athletics' | 'tennis'): void }) =>
       React.createElement('button', { 'data-testid': 'start-athletics', onClick: () => onPick('athletics') }),
   };
 });
@@ -211,6 +213,7 @@ describe('App vision mode lifecycle', () => {
   }
 
   async function enterPoseMode(): Promise<void> {
+    await act(async () => container!.querySelector<HTMLButtonElement>('[data-testid="home-to-games"]')!.click());
     await act(async () => {
       container!.querySelector<HTMLButtonElement>('[data-testid="start-athletics"]')!.click();
       await flushMicrotasks();
@@ -331,6 +334,37 @@ describe('App vision mode lifecycle', () => {
     expect(harness.handInput).toMatchObject({ visible: false, synced: false, syncProgress: 0 });
     expect(track.stop).not.toHaveBeenCalled();
     expect(container!.querySelector('[data-testid="stop-camera"]')).not.toBeNull();
+  });
+
+  it('never begins hand capture when a pending hand init resolves after pose took over', async () => {
+    let resolveHandInitialization!: () => void;
+    const handInitialization = new Promise<void>((resolve) => {
+      resolveHandInitialization = resolve;
+    });
+    harness.handInit.mockReturnValue(handInitialization);
+
+    const track = { stop: vi.fn() };
+    const stream = { getTracks: () => [track] } as unknown as MediaStream;
+    prepareMedia(async () => stream);
+    await mountApp();
+    await clickStartCamera();
+
+    await enterPoseMode();
+    expect(harness.poseBeginCapture).toHaveBeenCalledOnce();
+    expect(harness.handFrameCallbacks).toHaveLength(0);
+
+    await act(async () => {
+      resolveHandInitialization();
+      await flushMicrotasks();
+    });
+
+    // The late hand activation is stale: it must not start capturing over pose,
+    // and its completion must not disturb the running pose camera.
+    expect(harness.handFrameCallbacks).toHaveLength(0);
+    expect(harness.handErrorCallbacks).toHaveLength(0);
+    expect(track.stop).not.toHaveBeenCalled();
+    expect(container!.querySelector('[data-testid="stop-camera"]')).not.toBeNull();
+    expect(harness.posePauseCapture).not.toHaveBeenCalled();
   });
 
   it('stops the camera when the active pose provider rejects without a status callback', async () => {
