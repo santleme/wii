@@ -102,9 +102,12 @@ const SCALE_DEADBAND = 0.015;
 /** Shorter observation gaps keep the pointer filters and hand scale: late inference, not a new hand. */
 const FILTER_RESET_GAP_MS = 500;
 
+/** A sync survives missing frames this short: they neither hide the cursor nor stop its count. */
+const PRESENCE_GAP_MS = 150;
+
 /**
- * True once a rotation is committed: the cursor freezes and hover, click and back are suspended.
- * A mere candidate or a cancelled one must not make the cursor stick.
+ * True once a rotation is committed: the cursor freezes and hover is suspended. A mere candidate
+ * or a cancelled one must not make the cursor stick, though neither may click or go back.
  */
 export function rotationBlocksHandInput(phase: RotationalFlickPhase): boolean {
   return phase !== 'IDLE' && phase !== 'ROTATION_CANDIDATE' && phase !== 'CANCELLED';
@@ -258,7 +261,7 @@ export class HandCursorDetector {
     const raw = this.pointer(points);
     const gap = this.lastTimestampMs === undefined ? 0 : timestampMs - this.lastTimestampMs;
     const absenceMs = this.missingSinceMs === undefined ? 0 : timestampMs - this.missingSinceMs;
-    const countedPresenceGap = absenceMs > 150 ? 0 : gap;
+    const countedPresenceGap = absenceMs > PRESENCE_GAP_MS ? 0 : gap;
     const brokenTimeline = this.lastTimestampMs !== undefined && (gap < 0 || gap > this.maxFrameGapMs);
     if (gap < 0 || gap > Math.max(FILTER_RESET_GAP_MS, this.maxFrameGapMs)) {
       this.xFilter.reset();
@@ -351,7 +354,8 @@ export class HandCursorDetector {
           pinchRelease = true;
         }
       };
-      if (rotationBlocking) {
+      // Any rotation activity rearms click and back, so a flick in progress never triggers them.
+      if (rotation.phase !== 'IDLE') {
         this.pinchActive = false;
         this.pinchCandidateSinceMs = undefined;
         this.pinchNeedsRelease = true;
@@ -480,11 +484,13 @@ export class HandCursorDetector {
     this.backSinceMs = undefined;
     this.fistActive = false;
     const position = this.lastPosition ?? { x: 0, y: 0 };
+    const stillSyncing =
+      !this.synced && this.lastPosition !== undefined && timestampMs - this.missingSinceMs <= PRESENCE_GAP_MS;
     return {
-      visible: this.synced,
+      visible: this.synced || stillSyncing,
       x: position.x,
       y: position.y,
-      syncProgress: this.synced ? 1 : 0,
+      syncProgress: this.synced ? 1 : stillSyncing ? this.syncProgress() : 0,
       synced: this.synced,
       pinching: false,
       pinchRelease: false,

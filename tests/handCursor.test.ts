@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HandCursorDetector, type MenuHandSnapshot, rotationBlocksHandInput } from '../src/kinematics/handCursor';
+import { HandCursorDetector, type MenuHandSnapshot } from '../src/kinematics/handCursor';
 import { emptyHand, hand } from './fixtures/menuHand';
 import { rotationalWorldLandmarks } from './fixtures/rotationalHand';
 
@@ -61,6 +61,14 @@ describe('hand cursor synchronization and active zone', () => {
     detector.update(hand(100));
     detector.update(emptyHand(150));
     expect(detector.update(hand(200))).toMatchObject({ synced: true, visible: true });
+  });
+
+  it('does not blink on a single dropped frame while still syncing', () => {
+    const detector = new HandCursorDetector();
+    detector.update(hand(0));
+    detector.update(hand(100));
+    expect(detector.update(emptyHand(133))).toMatchObject({ visible: true, synced: false, syncProgress: 0.5 });
+    expect(detector.update(emptyHand(300))).toMatchObject({ visible: false, synced: false, syncProgress: 0 });
   });
 
   it('caps long observation gaps instead of counting time with no observed hand', () => {
@@ -549,8 +557,7 @@ describe('hand cursor rotational flick arbitration', () => {
     const detector = syncRotational();
     const rotating = rotate(detector, 216, 12, { pinchRatio: 0.2 });
     expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
-    const committed = rotating.filter((state) => rotationBlocksHandInput(state.rotationPhase));
-    expect(committed.every((state) => !state.pinchRelease && !state.pinching)).toBe(true);
+    expect(rotating.every((state) => !state.pinchRelease && !state.pinching)).toBe(true);
 
     const stillHeld = detector.update(rotationalMenuHand(500, 33, { pinchRatio: 0.2, rotationEnabled: false }));
     expect(stillHeld).toMatchObject({ pinchRelease: false, pinching: false });
@@ -564,8 +571,7 @@ describe('hand cursor rotational flick arbitration', () => {
     const detector = syncRotational();
     const rotating = rotate(detector, 216, 12, { imageCurl: 1, pinchRatio: 0.2 });
     expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
-    const committed = rotating.filter((state) => rotationBlocksHandInput(state.rotationPhase));
-    expect(committed.every((state) => state.backProgress === 0)).toBe(true);
+    expect(rotating.every((state) => state.backProgress === 0)).toBe(true);
     const after = detector.update(rotationalMenuHand(500, 33, { imageCurl: 1, pinchRatio: 0.2, rotationEnabled: false }));
     expect(after.backProgress).toBe(0);
   });
@@ -583,6 +589,25 @@ describe('hand cursor rotational flick arbitration', () => {
     expect(states[candidate]!.x).not.toBe(states[candidate - 1]!.x);
     const held = states[firstRotating - 1]!;
     expect(states.slice(firstRotating).every((state) => state.x === held.x && state.y === held.y)).toBe(true);
+  });
+
+  it('does not click or go back from a candidate or from the frame that cancels it', () => {
+    for (const gesture of [{ pinchRatio: 0.2 }, { imageCurl: 1 }]) {
+      const detector = syncRotational();
+      // A long candidate: weak enough never to commit, held past the pinch press time.
+      const candidate = [216, 266, 316, 366].map((time, index) =>
+        detector.update(rotationalMenuHand(time, index === 0 ? 0 : 3, index === 0 ? {} : gesture)),
+      );
+      const cancelled = detector.update({
+        ...rotationalMenuHand(416, 3, { ...gesture, curl: 1 }),
+      });
+      const phases = [...candidate, cancelled].map((state) => state.rotationPhase);
+      expect(phases).toContain('ROTATION_CANDIDATE');
+      expect(phases).not.toContain('ROTATING');
+      expect([...candidate, cancelled].every((state) => !state.pinchRelease && state.backProgress === 0)).toBe(true);
+      const after = detector.update(rotationalMenuHand(466, 3, { ...gesture, curl: 1 }));
+      expect(after).toMatchObject({ pinchRelease: false, backProgress: 0 });
+    }
   });
 
   it('cancels rotation on tracking loss instead of leaving velocity or gestures armed', () => {

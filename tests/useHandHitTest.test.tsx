@@ -115,13 +115,11 @@ describe('hand cursor DOM driver', () => {
     expect(click).not.toHaveBeenCalled();
   });
 
-  it('keeps hover and click during a mere rotation candidate', () => {
-    const click = vi.spyOn(button, 'click');
+  it('keeps hover during a mere rotation candidate', () => {
     const { store } = render();
-    publish(store, { rotationPhase: 'ROTATION_CANDIDATE', pinchRelease: true });
+    publish(store, { rotationPhase: 'ROTATION_CANDIDATE' });
     frame(1000);
     expect(button.getAttribute('data-hand-hover')).toBe('true');
-    expect(click).toHaveBeenCalledOnce();
   });
 
   it('goes back once per completed gesture and never during braking or snap', () => {

@@ -105,8 +105,9 @@ export default function App({ exit }: { exit?: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (screen === 'games') PoseClient.warmVisionAssets();
-  }, [screen]);
+    // Only for camera players: keyboard-only visitors do not pay for the pose model up front.
+    if (screen === 'games' && cameraOn) PoseClient.warmVisionAssets();
+  }, [screen, cameraOn]);
 
   const onEngine = useCallback((engine: GameEngineHandle | null) => { engineRef.current = engine; }, []);
   const dispatchEvent = useCallback((event: SportActionEvent) => {
