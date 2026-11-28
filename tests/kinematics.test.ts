@@ -269,6 +269,29 @@ describe('action pipeline tracking gate', () => {
     expect(events.filter((event) => event.type === 'sprint').every((event) => event.trackingState === 'tracked')).toBe(true);
   });
 
+  it('stamps sprint events with the torso gate state of their own frame, not a fixed tracked', () => {
+    const pipeline = new ActionPipeline();
+    const profile = calibration();
+    // Exactly one hip below the visibility floor: the cadence branch still runs through the
+    // shoulders-confident fallback while the torso gate needs its first frames to confirm.
+    const weakHip = (time: number, bounce: number) => {
+      const snapshot = poseWithHipBounce(time, bounce);
+      snapshot.landmarks = snapshot.landmarks.map((point, index) =>
+        index === 24 ? { ...point, visibility: 0.4, presence: 0.4 } : point);
+      return snapshot;
+    };
+    const stamps: string[] = [];
+    for (let time = 0; time <= 330; time += 33) {
+      const bounce = 0.05 * Math.sin((2 * Math.PI * time) / 400);
+      for (const event of pipeline.update(weakHip(time, bounce), profile).events) {
+        if (event.type === 'sprint') stamps.push(`${event.timestampMs}:${event.trackingState}`);
+      }
+    }
+    expect(stamps[0]).toBe('0:degraded');
+    expect(stamps[1]).toBe('33:degraded');
+    expect(stamps.at(-1)).toBe('330:tracked');
+  });
+
   it('keeps a standstill measured on a tracked pose stamped as tracked', () => {
     const pipeline = new ActionPipeline();
     const profile = calibration();
