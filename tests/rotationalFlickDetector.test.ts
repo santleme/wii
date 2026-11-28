@@ -114,7 +114,7 @@ describe('rotational flick detector — 25 deterministic scenarios', () => {
     expect(states[1]!.controlAngularVelocityDegPerSec).toBe(0);
   });
 
-  it('10 confirms ROTATING after sustained impulse inside the 80–120 ms design window', () => {
+  it('10 confirms ROTATING after sustained impulse inside the 64–120 ms design window', () => {
     const detector = new RotationalFlickDetector();
     const states = impulse(detector);
     const rotatingIndex = states.findIndex((state) => state.phase === 'ROTATING');
@@ -164,7 +164,7 @@ describe('rotational flick detector — 25 deterministic scenarios', () => {
 
   it('16 keeps neutral neither-open-nor-cupped articulation out of the candidate state', () => {
     const detector = new RotationalFlickDetector();
-    const states = impulse(detector, { curl: 0.57 });
+    const states = impulse(detector, { curl: 0.5 });
     expect(states.at(-1)).toMatchObject({ handShape: 'neutral', phase: 'IDLE' });
   });
 
@@ -282,6 +282,27 @@ describe('rotational flick detector — 25 deterministic scenarios', () => {
 });
 
 describe('rotational flick detector quality boundaries', () => {
+  it('survives the frame spacing of a slow webcam without cancelling', () => {
+    const detector = new RotationalFlickDetector();
+    const states = impulse(detector, { frames: 8, stepMs: 200, stepDeg: 20 });
+    expect(states.some((state) => state.rejectionReason === 'frame-gap')).toBe(false);
+    expect(states.at(-1)!.phase).toBe('ROTATING');
+  });
+
+  it('needs a second strong sample even when one slow frame spans the candidate window', () => {
+    const detector = new RotationalFlickDetector();
+    detector.update(sample(0, 0));
+    expect(detector.update(sample(150, 15)).phase).toBe('ROTATION_CANDIDATE');
+    expect(detector.update(sample(160, 15)).phase).toBe('ROTATION_CANDIDATE');
+  });
+
+  it('accepts a slightly curled hand and brakes only on a flat palm', () => {
+    const slightlyCurled = impulse(new RotationalFlickDetector(), { curl: 0.55 });
+    expect(slightlyCurled.some((state) => state.phase === 'ROTATING')).toBe(true);
+    expect(new RotationalFlickDetector().update(sample(0, 0, { curl: 0.4 })).handShape).toBe('open');
+    expect(new RotationalFlickDetector().update(sample(0, 0, { curl: 0.45 })).handShape).toBe('neutral');
+  });
+
   it('cancels an active rotation when tracking is lost and requires a new candidate afterwards', () => {
     const { detector, states } = rotatingDetector();
     const lost = detector.update({ timestampMs: states.at(-1)!.timestampMs + 16, handedness: 'right' });

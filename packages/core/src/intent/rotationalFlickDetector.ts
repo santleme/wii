@@ -70,12 +70,12 @@ export interface RotationalFlickConfig {
 export type RotationalFlickOptions = Partial<RotationalFlickConfig>;
 
 export const DEFAULT_ROTATIONAL_FLICK_CONFIG: RotationalFlickConfig = {
-  candidateMs: 100,
+  candidateMs: 80,
   candidateTimeoutMs: 180,
-  maxFrameGapMs: 120,
+  maxFrameGapMs: 250,
   frameAngularDeadZoneDeg: 0.05,
   velocityDeadZoneDegPerSec: 12,
-  candidateMinSpeedDegPerSec: 55,
+  candidateMinSpeedDegPerSec: 45,
   resumeSpeedDegPerSec: 40,
   recoveryEnterSpeedDegPerSec: 24,
   recoveryEnterMs: 40,
@@ -86,8 +86,8 @@ export const DEFAULT_ROTATIONAL_FLICK_CONFIG: RotationalFlickConfig = {
   snapSignalMs: 300,
   sensitivity: 1,
   maxAngularVelocityDegPerSec: 360,
-  openPalmMaxCurvature: 0.08,
-  cuppedMinCurvature: 0.15,
+  openPalmMaxCurvature: 0.06,
+  cuppedMinCurvature: 0.1,
   cuppedMaxCurvature: 0.55,
   smoothing: { minCutoff: 1.8, beta: 7, derivativeCutoff: 1 },
 };
@@ -531,7 +531,8 @@ export class RotationalFlickDetector {
       this.phase = 'ROTATION_CANDIDATE';
       this.phaseSinceMs = timestampMs;
       this.candidateDirection = moveDirection;
-      this.strongCandidateMs = dtMs;
+      // A slow frame must not fill the window by itself: a second strong sample is always needed.
+      this.strongCandidateMs = Math.min(dtMs, this.config.candidateMs / 2);
       this.lowSpeedSinceMs = undefined;
       this.reversalSinceMs = undefined;
     }
