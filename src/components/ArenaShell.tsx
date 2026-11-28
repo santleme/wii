@@ -31,6 +31,9 @@ export default function ArenaShell() {
     leaveTimer.current = window.setTimeout(() => {
       document.body.classList.add('is-arriving');
       navigate('/product');
+      // Invariante: este timer PRECISA sobreviver à shell — ele encerra a animação de chegada
+      // (body.is-arriving, 1,5 s em site.css) já na página de destino, com a ArenaShell desmontada
+      // pela navegação. Guardá-lo no leaveTimer e limpá-lo no cleanup travaria o body em overflow:hidden.
       window.setTimeout(() => document.body.classList.remove('is-arriving'), 1500);
     }, 1100);
   };
