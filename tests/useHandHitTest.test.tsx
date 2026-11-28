@@ -75,6 +75,18 @@ describe('hand cursor DOM driver', () => {
     expect(cursor.style.transform).toBe('translate3d(500px, 40px, 0)');
   });
 
+  it('keeps gliding through a CPU camera interval instead of arriving in one display frame', () => {
+    const { store, cursor } = render();
+    publish(store, { x: 100, y: 0 });
+    frame(1000);
+    publish(store, { x: 200, y: 0 });
+    frame(1016);
+    frame(1032);
+    const x = Number(/translate3d\(([\d.]+)px/.exec(cursor.style.transform)![1]);
+    expect(x).toBeGreaterThan(140);
+    expect(x).toBeLessThan(165);
+  });
+
   it('hit-tests on movement or periodically, not on every display frame', () => {
     const { store } = render();
     publish(store, {});

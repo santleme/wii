@@ -3,8 +3,8 @@ import { rotationBlocksHandInput, type HandCursorInput } from './handCursorTypes
 import type { HandInputStore } from './handInputStore';
 
 const HOVER = 'data-hand-hover';
-/** Time constant of the glide between camera samples. */
-const FOLLOW_TAU_MS = 25;
+/** Time constant of the glide between camera samples, tuned for CPU hand rates around 15–25 fps. */
+const FOLLOW_TAU_MS = 40;
 /** Hit-testing forces layout, so it waits for real movement... */
 const HIT_TEST_MIN_MOVE_PX = 2;
 /** ...or for this long, since the DOM can change under a still cursor. */

@@ -320,17 +320,45 @@ describe('hand cursor pinch click', () => {
     expect(detector.update(hand(1500, { pinchRatio: 0.2 }))).toMatchObject({ pinching: true, pinchRelease: true });
   });
 
+  it('keeps following the hand during a pinch candidate and freezes only when the click confirms', () => {
+    const detector = syncedForGestureTiming();
+    const before = detector.update(hand(1100, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.8 }));
+    const firstCandidate = detector.update(hand(1150, { tipX: 0.45, tipY: 0.42, pinchRatio: 0.2 }));
+    const lastCandidate = detector.update(hand(1200, { tipX: 0.5, tipY: 0.44, pinchRatio: 0.2 }));
+    const press = detector.update(hand(1250, { tipX: 0.55, tipY: 0.46, pinchRatio: 0.2 }));
+
+    expect(firstCandidate).toMatchObject({ pinchState: 'candidate', pinching: false, pinchRelease: false });
+    expect(lastCandidate).toMatchObject({ pinchState: 'candidate', pinching: false, pinchRelease: false });
+    expect(firstCandidate.freezeReason).toBeUndefined();
+    expect(lastCandidate.freezeReason).toBeUndefined();
+    expect(firstCandidate.x).toBeLessThan(before.x);
+    expect(lastCandidate.x).toBeLessThan(firstCandidate.x);
+    expect(press).toMatchObject({ pinchState: 'active', pinching: true, pinchRelease: true, freezeReason: 'pinch' });
+    expect(press.x).toBe(lastCandidate.x);
+    expect(press.y).toBe(lastCandidate.y);
+  });
+
+  it('passes hand worker telemetry through as diagnostics', () => {
+    const state = new HandCursorDetector().update({ ...hand(0), handInferenceMs: 42.5, workerFps: 17.5 });
+    expect(state).toMatchObject({
+      pinchState: 'idle',
+      swipeMoving: false,
+      handInferenceMs: 42.5,
+      workerFps: 17.5,
+    });
+  });
+
   it('fires once through the hysteresis cycle and freezes the cursor while pinching', () => {
     const detector = syncedForGestureTiming();
-    const target = detector.update(hand(1100, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.8 }));
-    detector.update(hand(1150, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.2 }));
+    detector.update(hand(1100, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.8 }));
+    const candidate = detector.update(hand(1150, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.2 }));
     const press = detector.update(hand(1250, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.2 }));
-    expect(press).toMatchObject({ pinching: true, pinchRelease: true, x: target.x, y: target.y });
+    expect(press).toMatchObject({ pinching: true, pinchRelease: true, x: candidate.x, y: candidate.y });
     const held = detector.update(hand(1250, { tipX: 0.7, tipY: 0.7, pinchRatio: 0.35 }));
-    expect(held).toMatchObject({ pinching: true, pinchRelease: false, x: target.x, y: target.y });
+    expect(held).toMatchObject({ pinching: true, pinchRelease: false, x: candidate.x, y: candidate.y });
     const released = detector.update(hand(1300, { tipX: 0.7, tipY: 0.7, pinchRatio: 0.6 }));
     expect(released).toMatchObject({ pinching: false, pinchRelease: false });
-    expect(released.x).not.toBeCloseTo(target.x);
+    expect(released.x).not.toBeCloseTo(candidate.x);
   });
 
   it('keeps the click cooldown and re-arm requirement across a tracking-loss frame', () => {
@@ -398,16 +426,16 @@ describe('hand cursor pinch click', () => {
 describe('hand cursor integrated gesture session', () => {
   it('syncs, clicks once at the frozen target, then completes a back gesture', () => {
     const detector = syncedForGestureTiming();
-    const target = detector.update(hand(1100, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.8 }));
-    detector.update(hand(1150, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.2 }));
+    detector.update(hand(1100, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.8 }));
+    const candidate = detector.update(hand(1150, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.2 }));
     const clickStates = [
       detector.update(hand(1250, { tipX: 0.4, tipY: 0.4, pinchRatio: 0.2 })),
       detector.update(hand(1300, { tipX: 0.65, tipY: 0.65, pinchRatio: 0.35 })),
       detector.update(hand(1350, { tipX: 0.65, tipY: 0.65, pinchRatio: 0.7 })),
     ];
     expect(clickStates.map((state) => state.pinchRelease)).toEqual([true, false, false]);
-    expect(clickStates[0]).toMatchObject({ x: target.x, y: target.y });
-    expect(clickStates[1]).toMatchObject({ x: target.x, y: target.y });
+    expect(clickStates[0]).toMatchObject({ x: candidate.x, y: candidate.y });
+    expect(clickStates[1]).toMatchObject({ x: candidate.x, y: candidate.y });
 
     detector.update(hand(1400, { curl: 1 }));
     expect(detector.update(hand(1900, { curl: 1 }))).toMatchObject({
@@ -589,6 +617,15 @@ describe('hand cursor rotational flick arbitration', () => {
     const states = rotate(detector, 216, 14, { pinchRatio: 0.2 });
     expect(states.some((state) => state.pinchRelease)).toBe(true);
     expect(states.every((state) => !rotationBlocksHandInput(state.rotationPhase))).toBe(true);
+  });
+
+  it('does not reset a rotation candidate for a pinch candidate that is released before confirmation', () => {
+    const detector = syncRotational();
+    detector.update(rotationalMenuHand(216, 0, { pinchRatio: 0.8 }));
+    expect(detector.update(rotationalMenuHand(232, 3, { pinchRatio: 0.8 })).rotationPhase).toBe('ROTATION_CANDIDATE');
+    expect(detector.update(rotationalMenuHand(248, 6, { pinchRatio: 0.2 })).pinchState).toBe('candidate');
+    const released = detector.update(rotationalMenuHand(264, 9, { pinchRatio: 0.8 }));
+    expect(released).toMatchObject({ pinchState: 'idle', rotationPhase: 'ROTATION_CANDIDATE' });
   });
 
   it('keeps following a rotation candidate and freezes only once rotation is committed', () => {

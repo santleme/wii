@@ -48,6 +48,30 @@ describe('hand swipe detector', () => {
     expect(diagonal.every((direction) => direction === 0)).toBe(true);
   });
 
+  it('reads a swipe at 15–20fps even when one frame is slower than the instantaneous threshold', () => {
+    const detector = new HandSwipeDetector();
+    const xs = [0.7, 0.7, 0.58, 0.5, 0.38];
+    const pulses = xs.map(
+      (x, index) => detector.update({ timestampMs: index * 60, x, y: 0.5, blocked: false }),
+    );
+    expect(pulses.map((state) => state.direction)).toContain(1);
+  });
+
+  it('uses net horizontal displacement through a slightly diagonal noisy frame', () => {
+    const detector = new HandSwipeDetector();
+    const points = [
+      { x: 0.7, y: 0.5 },
+      { x: 0.7, y: 0.5 },
+      { x: 0.58, y: 0.52 },
+      { x: 0.5, y: 0.6 },
+      { x: 0.38, y: 0.53 },
+    ];
+    const pulses = points.map(
+      (point, index) => detector.update({ timestampMs: index * 60, ...point, blocked: false }),
+    );
+    expect(pulses.map((state) => state.direction)).toContain(1);
+  });
+
   it('allows a correction in the opposite direction after 450ms', () => {
     const detector = new HandSwipeDetector();
     expect(feed(detector, 0, [...rest, ...leftward])).toEqual([1]);
@@ -148,6 +172,17 @@ describe('hand cursor swipe arbitration', () => {
     );
     expect(pulses(dragged)).toEqual([]);
     expect(pulses(run({ curl: 1 }))).toEqual([]);
+  });
+
+  it('is not disarmed by a pinch candidate that never confirms', () => {
+    const detector = new HandCursorDetector();
+    for (let time = 0; time <= 300; time += 33) detector.update(hand(time, { tipX: 0.3, pinchRatio: 0.8 }));
+    expect(detector.update(hand(330, { tipX: 0.3, pinchRatio: 0.2 })).pinchState).toBe('candidate');
+    const states = [1, 2, 3, 4].map((step) =>
+      detector.update(hand(330 + step * 33, { tipX: 0.3 + step * 0.1, pinchRatio: 0.2 })),
+    );
+    expect(states.every((state) => !state.pinching && !state.pinchRelease)).toBe(true);
+    expect(pulses(states)).toEqual([1]);
   });
 
   const turning = (time: number, angle: number, tipX: number) => ({

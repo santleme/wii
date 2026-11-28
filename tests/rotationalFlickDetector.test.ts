@@ -212,27 +212,50 @@ describe('rotational flick detector — 25 deterministic scenarios', () => {
     expect(Math.max(...confirmations) - Math.min(...confirmations)).toBeLessThanOrEqual(34);
   });
 
-  it('21 brakes immediately when the palm opens during ROTATING', () => {
-    const { detector, states } = rotatingDetector();
-    const last = states.at(-1)!;
-    const braked = detector.update(sample(last.timestampMs + 16, 30, { curl: 0 }));
-    expect(braked).toMatchObject({ phase: 'BRAKING', handShape: 'open', controlAngularVelocityDegPerSec: 0 });
-  });
-
-  it('22 publishes SNAP_TO_CARD only after the 50–80 ms open-palm confirmation delay', () => {
+  it('21 does not brake on one open-palm frame, but brakes once opening persists', () => {
     const { detector, states } = rotatingDetector();
     let time = states.at(-1)!.timestampMs;
+    let angle = 33;
     time += 16;
-    const braked = detector.update(sample(time, 30, { curl: 0 }));
-    expect(braked.phase).toBe('BRAKING');
+    expect(detector.update(sample(time, angle, { curl: 0 })).phase).toBe('ROTATING');
     time += 16;
-    const early = detector.update(sample(time, 30, { curl: 0 }));
+    angle += 3;
+    expect(detector.update(sample(time, angle)).phase).toBe('ROTATING');
+
+    const openStates: RotationalFlickState[] = [];
+    for (let index = 0; index < 6; index += 1) {
+      time += 16;
+      angle += 3;
+      openStates.push(detector.update(sample(time, angle, { curl: 0 })));
+    }
+    expect(openStates[4]!.phase).toBe('ROTATING');
+    expect(openStates[5]).toMatchObject({ phase: 'BRAKING', handShape: 'open', controlAngularVelocityDegPerSec: 0 });
+  });
+
+  it('22 publishes SNAP_TO_CARD only after open-palm braking and its confirmation delay', () => {
+    const { detector, states } = rotatingDetector();
+    let time = states.at(-1)!.timestampMs;
+    let angle = 33;
+    let firstOpen: RotationalFlickState | undefined;
+    let braked: RotationalFlickState | undefined;
+    for (let index = 0; index < 6 && !braked; index += 1) {
+      time += 16;
+      angle += 3;
+      const state = detector.update(sample(time, angle, { curl: 0 }));
+      firstOpen ??= state;
+      if (state.phase === 'BRAKING') braked = state;
+    }
+    expect(firstOpen?.phase).toBe('ROTATING');
+    expect(braked).toBeDefined();
+    expect(braked!.timestampMs - firstOpen!.timestampMs).toBeGreaterThanOrEqual(70);
+    time += 16;
+    const early = detector.update(sample(time, angle, { curl: 0 }));
     expect(early.phase).toBe('BRAKING');
     time += 49;
-    const snap = detector.update(sample(time, 30, { curl: 0 }));
+    const snap = detector.update(sample(time, angle, { curl: 0 }));
     expect(snap.phase).toBe('SNAP_TO_CARD');
-    expect(snap.timestampMs - braked.timestampMs).toBeGreaterThanOrEqual(50);
-    expect(snap.timestampMs - braked.timestampMs).toBeLessThanOrEqual(80);
+    expect(snap.timestampMs - braked!.timestampMs).toBeGreaterThanOrEqual(50);
+    expect(snap.timestampMs - braked!.timestampMs).toBeLessThanOrEqual(80);
   });
 
   it('23 enters RECOVERY on opposite return motion and stops emitting drive velocity', () => {
@@ -303,6 +326,48 @@ describe('rotational flick detector quality boundaries', () => {
     expect(new RotationalFlickDetector().update(sample(0, 0, { curl: 0.45 })).handShape).toBe('neutral');
     // A relaxed pointing hand stays out of rotation.
     expect(new RotationalFlickDetector().update(sample(0, 0, { curl: 0.55 })).handShape).toBe('neutral');
+  });
+
+  it('tolerates a brief open frame in a candidate at 20fps and still confirms', () => {
+    const detector = new RotationalFlickDetector();
+    const states = [
+      detector.update(sample(0, 0)),
+      detector.update(sample(50, 5)),
+      detector.update(sample(100, 10, { curl: 0.4 })),
+      detector.update(sample(150, 15)),
+      detector.update(sample(200, 20)),
+    ];
+    expect(states.some((state) => state.phase === 'CANCELLED')).toBe(false);
+    expect(states.at(-1)?.phase).toBe('ROTATING');
+  });
+
+  it('cancels a candidate only when an open or closed shape persists', () => {
+    const detector = new RotationalFlickDetector();
+    const states = [
+      detector.update(sample(0, 0)),
+      detector.update(sample(50, 5)),
+      detector.update(sample(100, 10, { curl: 0.4 })),
+      detector.update(sample(150, 15, { curl: 0.4 })),
+      detector.update(sample(200, 20, { curl: 0.4 })),
+    ];
+    expect(states.at(-1)).toMatchObject({ phase: 'CANCELLED', rejectionReason: 'hand-shape' });
+  });
+
+  it('measures roll around a moderately tilted palm normal instead of only camera z', () => {
+    const detector = new RotationalFlickDetector({ frameAngularDeadZoneDeg: 0 });
+    const tilt = { xDeg: 15, yDeg: 25 };
+    detector.update(sample(0, 0, { tilt }));
+    const state = detector.update(sample(16, 3, { tilt }));
+    expect(state.rawAngularVelocityDegPerSec).toBeGreaterThan(170);
+    expect(state.rawAngularVelocityDegPerSec).toBeLessThan(205);
+  });
+
+  it('does not read a pure yaw or pitch wobble as a rotational flick', () => {
+    const detector = new RotationalFlickDetector();
+    const states = [0, 1, 2, 3, 4, 5].map((index) =>
+      detector.update(sample(index * 16, 0, { tilt: { xDeg: index * 1.5, yDeg: 10 + index * 2 } })),
+    );
+    expect(states.every((state) => state.phase === 'IDLE')).toBe(true);
   });
 
   it('does not start a candidate from the roll of a hand that is merely moving', () => {

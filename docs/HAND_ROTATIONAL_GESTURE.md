@@ -50,7 +50,7 @@ A base da palma preserva a rotação global da mão no espaço da câmera. Isso 
 - `ROTATION_CANDIDATE`: 110 ms de evidência antes de assumir controle. Ainda não bloqueia nada: pinça, voltar e swipe seguem ativos, e uma pinça em andamento desliga a rotação.
 - `ROTATING`: a velocidade angular arbitrada alimenta o carrossel; hover, clique, voltar e swipe ficam bloqueados.
 - `RECOVERY`: o retorno passivo da mão mantém momentum; pequenas velocidades contrárias são zeradas. Uma reversão exige impulso acima de limiar maior com histerese.
-- `BRAKING`: palma aberta; a velocidade de controle vai a zero e o carrossel desacelera imediatamente.
+- `BRAKING`: palma aberta sustentada por 70 ms; a velocidade de controle vai a zero e o carrossel desacelera imediatamente.
 - `SNAP_TO_CARD`: o canal mais próximo (`Math.round(turn)`) vira alvo do snap.
 - `CANCELLED`: perda de mão, timestamps inválidos, gap longo ou troca de quiralidade. Ao sair da rotação, pinça e punho precisam ser rearmados (`release`/`open`) antes de clicar ou voltar.
 
@@ -60,6 +60,8 @@ A base da palma preserva a rotação global da mão no espaço da câmera. Isso 
 |---|---:|---|
 | `candidateMs` | 110 ms | evita que mover a mão ou pinçar vire rotação; o primeiro frame conta no máximo metade |
 | `candidateMinSpeedDegPerSec` | 70°/s | acima do giro incidental de quem só move a mão |
+| `candidateTimeoutMs` | 240 ms | tolera frame ruidoso de forma/curvatura a 15–20 fps sem manter candidatura indefinida |
+| `openBrakeConfirmMs` / `candidateShapeCancelMs` | 70 / 70 ms | histerese contra um frame isolado de dedos abertos ou fechados |
 | `maxFrameGapMs` | 250 ms | tolera a cadência de webcams lentas |
 | `reversalSpeedDegPerSec` | 95°/s | reversão exige mais energia que a entrada |
 | `maxAngularVelocityDegPerSec` | 360°/s | teto de uma volta visual por segundo |
@@ -85,7 +87,7 @@ O loop de `requestAnimationFrame` roda enquanto a roda está pronta, com ou sem 
 
 ## Swipe lateral
 
-`src/kinematics/handSwipe.ts` avança ou volta um canal com um movimento horizontal rápido (mão para a esquerda avança). Exige 1,55 largura de imagem por segundo por 40 ms, em pelo menos duas amostras e predominantemente horizontal (1,25× a vertical), com a mão antes em repouso. Há cooldown de 350 ms no mesmo sentido e 450 ms no oposto. Fica bloqueado durante pinça, punho e rotação comprometida, e a pinça só rearma quando a mão desacelera. Um alcance muito rápido do cursor também pode dispará-lo.
+`src/kinematics/handSwipe.ts` avança ou volta um canal com um movimento horizontal rápido (mão para a esquerda avança). Avalia janelas deslizantes de 40–140 ms: exige velocidade média de 1,55 largura de imagem por segundo, deslocamento horizontal líquido de pelo menos 0,1 largura, dominância horizontal (1,25× a vertical) e pelo menos dois intervalos no mesmo sentido, com a mão antes em repouso. Há cooldown de 350 ms no mesmo sentido e 450 ms no oposto. Fica bloqueado durante pinça, punho e rotação comprometida, e a pinça só rearma quando a mão desacelera. Um alcance muito rápido do cursor também pode dispará-lo.
 
 ## Diagnóstico opcional
 
@@ -94,6 +96,7 @@ Ative com `?handDebug=1`. O overlay mostra apenas dados reais do pipeline:
 - fase, forma da mão e curvatura;
 - base 3D (normal da palma e eixo punho→médio);
 - velocidade angular bruta, filtrada e arbitrada;
+- estado da pinça, motivo de congelamento, movimento de swipe, latência captura→entrega e FPS efetivo do worker;
 - direção, motivo de rejeição, `dt` e FPS efetivo da mão;
 - modo, velocidade, `turn`, canal frontal, `dt` e FPS efetivo do carrossel.
 

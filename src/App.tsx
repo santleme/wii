@@ -84,6 +84,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
   const contextRef = useRef(new ContextClassifier());
   const calibratorRef = useRef(new AdaptiveCalibrator());
   const handDetectorRef = useRef(new HandCursorDetector());
+  const lastHandDeliveryAtRef = useRef<number | undefined>(undefined);
   const sportRef = useRef(sport);
   sportRef.current = sport;
   const screenRef = useRef(screen);
@@ -167,6 +168,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
     setCameraStatus('Câmera desligada');
     handStore.publish(HAND_IDLE);
     handDetectorRef.current.reset();
+    lastHandDeliveryAtRef.current = undefined;
     for (const event of pipelineRef.current.reset(performance.now())) dispatchEvent(event);
     engineRef.current?.resetLaneZone?.();
     engineRef.current?.setGuard?.(undefined, null);
@@ -322,6 +324,12 @@ export default function App({ exit }: { exit?: ReactNode }) {
     if (stale() || !handClient.isReady || !streamRef.current || activeVisionModeRef.current !== 'hand') return;
     handClient.beginCapture(video, (snapshot, aspectY) => {
       if (stale()) return;
+      const deliveredAtMs = performance.now();
+      const previousDeliveryAtMs = lastHandDeliveryAtRef.current;
+      lastHandDeliveryAtRef.current = deliveredAtMs;
+      const handInferenceMs = Math.max(0, deliveredAtMs - snapshot.timestampMs);
+      const workerFps =
+        previousDeliveryAtMs === undefined ? undefined : 1000 / Math.max(deliveredAtMs - previousDeliveryAtMs, 0.01);
       const primary = snapshot.hands[0];
       const state = handDetectorRef.current.update({
         timestampMs: snapshot.timestampMs,
@@ -330,6 +338,8 @@ export default function App({ exit }: { exit?: ReactNode }) {
         handedness: primary?.handedness,
         aspectY,
         rotationEnabled: screenRef.current === 'home' && homeRotationGateRef.current,
+        handInferenceMs,
+        workerFps,
       });
       handStore.publish({
         visible: state.visible,
@@ -338,9 +348,14 @@ export default function App({ exit }: { exit?: ReactNode }) {
         syncProgress: state.syncProgress,
         synced: state.synced,
         pinching: state.pinching,
+        pinchState: state.pinchState,
+        freezeReason: state.freezeReason,
         pinchRelease: state.pinchRelease,
         backProgress: state.backProgress,
         swipeDirection: state.swipeDirection,
+        swipeMoving: state.swipeMoving,
+        handInferenceMs: state.handInferenceMs,
+        workerFps: state.workerFps,
         capturedAtMs: snapshot.timestampMs,
         rotationPhase: state.rotationPhase,
         rotationAngularVelocity: state.rotationAngularVelocity,
@@ -391,6 +406,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
     const previous = activateVisionMode(next);
     if (previous !== undefined) {
       handDetectorRef.current.reset();
+      lastHandDeliveryAtRef.current = undefined;
       handStore.publish(HAND_IDLE);
       if (next === 'hand') {
         poseClientRef.current?.pauseCapture();

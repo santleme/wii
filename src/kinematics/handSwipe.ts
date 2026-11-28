@@ -15,9 +15,9 @@ export interface HandSwipeState {
 }
 
 export interface HandSwipeOptions {
-  /** Horizontal speed, in image widths per second. */
+  /** Horizontal speed, in image widths per second, measured over a short sliding window. */
   minSpeed?: number;
-  /** The speed has to hold this long, over at least two samples. */
+  /** Shortest window evaluated for a swipe. */
   minDurationMs?: number;
   /** Below this speed the hand counts as at rest and the next swipe is armed. */
   rearmSpeed?: number;
@@ -25,21 +25,29 @@ export interface HandSwipeOptions {
   /** Longer than the cooldown, so the hand returning to its place is not read as a swipe back. */
   reverseGuardMs?: number;
   maxFrameGapMs?: number;
+  /** Longest sliding window evaluated for net displacement. */
+  windowMs?: number;
+  /** Net horizontal displacement inside the window, in image widths. */
+  minDistance?: number;
 }
 
-/** Horizontal speed has to beat vertical by this much, so a diagonal pointer move is not a swipe. */
+/** Horizontal displacement has to beat vertical by this much, so a diagonal pointer move is not a swipe. */
 const HORIZONTAL_DOMINANCE = 1.25;
 
 const STILL: HandSwipeState = { direction: 0, moving: false };
 
+interface MotionSample {
+  timestampMs: number;
+  x: number;
+  y: number;
+}
+
 /** Detects a quick sideways flick of the hand from its 2D position. */
 export class HandSwipeDetector {
   private readonly options: Required<HandSwipeOptions>;
-  private previous?: { timestampMs: number; x: number; y: number };
+  private previous?: MotionSample;
+  private motion: MotionSample[] = [];
   private armed = false;
-  private heading = 0;
-  private heldMs = 0;
-  private samples = 0;
   private lastSwipe?: { timestampMs: number; heading: number };
 
   constructor(options: HandSwipeOptions = {}) {
@@ -51,13 +59,16 @@ export class HandSwipeDetector {
       cooldownMs: 350,
       reverseGuardMs: 450,
       maxFrameGapMs: 250,
+      windowMs: 140,
+      minDistance: 0.1,
       ...options,
     };
   }
 
   update({ timestampMs, x, y, blocked }: HandSwipeSample): HandSwipeState {
     const previous = this.previous;
-    this.previous = { timestampMs, x, y };
+    const current = { timestampMs, x, y };
+    this.previous = current;
     const dtMs = previous ? timestampMs - previous.timestampMs : 0;
     if (blocked || !previous || dtMs <= 0 || dtMs > this.options.maxFrameGapMs) {
       this.disarm();
@@ -69,46 +80,117 @@ export class HandSwipeDetector {
     // Rest is judged on both axes: a hand still travelling vertically is not waiting for a swipe.
     if (Math.hypot(vx, vy) <= this.options.rearmSpeed) {
       this.armed = true;
-      this.heldMs = 0;
-      this.samples = 0;
-      return STILL;
-    }
-    if (Math.abs(vx) < this.options.minSpeed || Math.abs(vx) <= Math.abs(vy) * HORIZONTAL_DOMINANCE) {
-      this.heldMs = 0;
-      this.samples = 0;
+      this.motion = [];
       return STILL;
     }
 
-    const heading = Math.sign(vx);
-    if (heading !== this.heading) {
-      this.heading = heading;
-      this.heldMs = 0;
-      this.samples = 0;
-    }
-    this.heldMs += dtMs;
-    this.samples += 1;
+    if (this.motion.length === 0) this.motion.push(previous);
+    this.motion.push(current);
+    this.prune(timestampMs);
+
+    const movement = this.windowMovement(timestampMs);
+    if (!movement.moving) return STILL;
+
     const sinceSwipe = this.lastSwipe ? timestampMs - this.lastSwipe.timestampMs : Number.POSITIVE_INFINITY;
-    const guardMs = this.lastSwipe?.heading === heading ? this.options.cooldownMs : this.options.reverseGuardMs;
-    // Two samples: a single jump of the tracker is not a movement.
-    if (!this.armed || this.samples < 2 || this.heldMs < this.options.minDurationMs || sinceSwipe < guardMs)
-      return { direction: 0, moving: true };
+    const pulse = movement.pulse;
+    const guardMs = pulse && this.lastSwipe?.heading === pulse.heading ? this.options.cooldownMs : this.options.reverseGuardMs;
+    if (!this.armed || !pulse || sinceSwipe < guardMs) return { direction: 0, moving: true };
 
     this.armed = false;
-    this.lastSwipe = { timestampMs, heading };
-    return { direction: heading < 0 ? 1 : -1, moving: true };
+    this.lastSwipe = { timestampMs, heading: pulse.heading };
+    return { direction: pulse.heading < 0 ? 1 : -1, moving: true };
   }
 
   /** Forgets the motion in progress; the cooldown survives, so losing the hand cannot skip it. */
   disarm(): void {
     this.armed = false;
-    this.heading = 0;
-    this.heldMs = 0;
-    this.samples = 0;
+    this.motion = [];
   }
 
   reset(): void {
     this.disarm();
     this.previous = undefined;
     this.lastSwipe = undefined;
+  }
+
+  private prune(timestampMs: number): void {
+    const cutoffMs = timestampMs - this.options.windowMs;
+    // Keep one sample before the cutoff so the exact window edge can be interpolated.
+    while (this.motion.length > 2 && this.motion[1]!.timestampMs < cutoffMs) this.motion.shift();
+  }
+
+  private windowMovement(endMs: number): { moving: boolean; pulse?: { heading: -1 | 1; speed: number } } {
+    const end = this.motion.at(-1);
+    const first = this.motion[0];
+    if (!end || !first) return { moving: false };
+
+    const cutoffMs = endMs - this.options.windowMs;
+    const latestStartMs = endMs - this.options.minDurationMs;
+    const starts = new Map<number, MotionSample>();
+    if (cutoffMs >= first.timestampMs && cutoffMs <= latestStartMs) {
+      const edge = this.positionAt(cutoffMs);
+      if (edge) starts.set(cutoffMs, edge);
+    }
+    for (const sample of this.motion) {
+      if (sample.timestampMs >= cutoffMs && sample.timestampMs <= latestStartMs) starts.set(sample.timestampMs, sample);
+    }
+
+    let moving = false;
+    let pulse: { heading: -1 | 1; speed: number } | undefined;
+    for (const start of starts.values()) {
+      const durationMs = endMs - start.timestampMs;
+      if (durationMs < this.options.minDurationMs || durationMs > this.options.windowMs) continue;
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const absX = Math.abs(dx);
+      if (absX <= Math.abs(dy) * HORIZONTAL_DOMINANCE) continue;
+      const speed = absX / (durationMs / 1000);
+      if (speed < this.options.minSpeed) continue;
+      const heading = Math.sign(dx) as -1 | 1;
+      if (!this.hasSustainedMotion(start.timestampMs, endMs, heading)) continue;
+      moving = true;
+      if (absX >= this.options.minDistance && (!pulse || speed > pulse.speed)) pulse = { heading, speed };
+    }
+    return { moving, pulse };
+  }
+
+  /**
+   * A window is sustained when at least two frame intervals inside it move the same way. One bad
+   * interval only lowers the net displacement; it no longer erases the whole swipe.
+   */
+  private hasSustainedMotion(startMs: number, endMs: number, heading: -1 | 1): boolean {
+    let intervals = 0;
+    for (let index = 1; index < this.motion.length; index += 1) {
+      const before = this.motion[index - 1]!;
+      const after = this.motion[index]!;
+      const overlapStartMs = Math.max(before.timestampMs, startMs);
+      const overlapEndMs = Math.min(after.timestampMs, endMs);
+      const intervalMs = after.timestampMs - before.timestampMs;
+      if (overlapEndMs <= overlapStartMs || intervalMs <= 0) continue;
+      const overlapRatio = (overlapEndMs - overlapStartMs) / intervalMs;
+      const overlapDx = (after.x - before.x) * overlapRatio;
+      const intervalSpeed = Math.abs(after.x - before.x) / (intervalMs / 1000);
+      if (Math.sign(overlapDx) === heading && intervalSpeed >= this.options.rearmSpeed) intervals += 1;
+    }
+    return intervals >= 2;
+  }
+
+  private positionAt(timestampMs: number): MotionSample | undefined {
+    const first = this.motion[0];
+    if (!first || timestampMs < first.timestampMs) return undefined;
+    for (let index = 1; index < this.motion.length; index += 1) {
+      const before = this.motion[index - 1]!;
+      const after = this.motion[index]!;
+      if (timestampMs > after.timestampMs) continue;
+      const spanMs = after.timestampMs - before.timestampMs;
+      if (spanMs <= 0) return after;
+      const progress = (timestampMs - before.timestampMs) / spanMs;
+      return {
+        timestampMs,
+        x: before.x + (after.x - before.x) * progress,
+        y: before.y + (after.y - before.y) * progress,
+      };
+    }
+    return this.motion.at(-1);
   }
 }

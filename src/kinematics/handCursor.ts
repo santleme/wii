@@ -24,6 +24,10 @@ export interface MenuHandSnapshot {
   worldLandmarks?: readonly Point3[];
   /** O gesto rotacional só é alimentado quando a HomeMenu expõe a roda interativa. */
   rotationEnabled?: boolean;
+  /** Diagnóstico de captura→entrega calculado por quem publica a amostra, em ms. */
+  handInferenceMs?: number;
+  /** Diagnóstico da taxa efetiva de entregas do worker, calculado por quem publica a amostra. */
+  workerFps?: number;
 }
 
 export interface HandCursorZone {
@@ -60,9 +64,19 @@ export interface HandCursorState {
   syncProgress: number;
   synced: boolean;
   pinching: boolean;
+  /** Estado interno da pinça, para diagnosticar a espera de confirmação sem expor contadores. */
+  pinchState: 'idle' | 'candidate' | 'active';
+  /** Motivo do cursor estar congelado nesta amostra; ausente quando ele acompanha a mão. */
+  freezeReason?: 'pinch' | 'fist' | 'rotation';
   /** Pulso de clique confirmado na ativação da pinça; não indica a soltura física dos dedos. */
   pinchRelease: boolean;
   backProgress: number;
+  /** A mão está em deslocamento lateral rápido, antes ou durante um pulso de swipe. */
+  swipeMoving: boolean;
+  /** Diagnóstico de captura→entrega repassado da amostra de entrada. */
+  handInferenceMs?: number;
+  /** Diagnóstico da taxa efetiva de entregas repassado da amostra de entrada. */
+  workerFps?: number;
   activeZone: HandCursorZone;
   rotationPhase: RotationalFlickPhase;
   /** Velocidade sanitizada que o carrossel pode consumir, em deg/s. */
@@ -316,10 +330,11 @@ export class HandCursorDetector {
     const smoothX = this.xFilter.filter(mapped.x, timestampMs);
     const smoothY = this.yFilter.filter(mapped.y, timestampMs);
 
-    // A pinch already under way owns the hand: rotation is off, so it cannot steal the click.
-    const pinchEngaged = this.pinchActive || this.pinchCandidateSinceMs !== undefined;
+    // Only a gesture that already owns the hand disables rotation. A pinch candidate is just
+    // finger proximity noise until the press timer confirms it.
+    const gestureEngaged = this.pinchActive || this.fistActive;
     const rotation = this.updateRotation(
-      pinchEngaged ? { ...snapshot, rotationEnabled: false } : snapshot,
+      gestureEngaged ? { ...snapshot, rotationEnabled: false } : snapshot,
       true,
     );
     const rotationBlocking = rotationBlocksHandInput(rotation.phase);
@@ -341,7 +356,6 @@ export class HandCursorDetector {
         !this.synced ||
         rotationBlocking ||
         this.pinchActive ||
-        this.pinchCandidateSinceMs !== undefined ||
         this.fistActive ||
         closedFist(points, false, this.fistEnterStraightness, this.fistReleaseStraightness, aspectY),
     });
@@ -444,10 +458,10 @@ export class HandCursorDetector {
     }
 
     const candidate = { x: clamp(smoothX), y: clamp(smoothY) };
-    if (pinching || pinchCandidate || fist || rotationBlocking) this.frozenPosition ??= this.lastFreePosition ?? candidate;
+    if (pinching || fist || rotationBlocking) this.frozenPosition ??= this.lastFreePosition ?? candidate;
     else this.frozenPosition = undefined;
     const position = this.frozenPosition ?? candidate;
-    if (!pinching && !pinchCandidate && !fist && !rotationBlocking) this.lastFreePosition = candidate;
+    if (!pinching && !fist && !rotationBlocking) this.lastFreePosition = candidate;
     this.lastPosition = position;
     return {
       // Visible while still syncing, so the progress ring can be seen.
@@ -457,9 +471,14 @@ export class HandCursorDetector {
       syncProgress: this.synced ? 1 : this.syncProgress(),
       synced: this.synced,
       pinching,
+      pinchState: pinching ? 'active' : pinchCandidate ? 'candidate' : 'idle',
+      freezeReason: pinching ? 'pinch' : fist ? 'fist' : rotationBlocking ? 'rotation' : undefined,
       pinchRelease,
       backProgress,
       swipeDirection: swipe.direction,
+      swipeMoving: swipe.moving,
+      handInferenceMs: snapshot.handInferenceMs,
+      workerFps: snapshot.workerFps,
       activeZone: { ...this.activeZone },
       ...this.rotationOutput(rotation),
     };
@@ -520,9 +539,13 @@ export class HandCursorDetector {
       syncProgress: this.synced ? 1 : stillSyncing ? this.syncProgress() : 0,
       synced: this.synced,
       pinching: false,
+      pinchState: 'idle',
       pinchRelease: false,
       backProgress: 0,
       swipeDirection: 0,
+      swipeMoving: false,
+      handInferenceMs: snapshot.handInferenceMs,
+      workerFps: snapshot.workerFps,
       activeZone: { ...this.activeZone },
       ...this.rotationOutput(rotation),
     };
