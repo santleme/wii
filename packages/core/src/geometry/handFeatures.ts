@@ -23,6 +23,17 @@ export interface CanonicalHandFeatures {
   imageVelocity: Vector2;
 }
 
+export interface PalmBasis {
+  /** Pinky-to-index palm direction, orthogonalized against the palm length axis. */
+  xAxis: Vector3;
+  /** Wrist-to-middle-MCP direction. */
+  yAxis: Vector3;
+  /** Palm normal in a right-handed x × y basis. */
+  zAxis: Vector3;
+  /** Wrist-to-middle-MCP length in the input coordinate units. */
+  palmLength: number;
+}
+
 interface PreviousHand {
   timestampMs: number;
   landmarks: readonly Vector3[];
@@ -92,7 +103,11 @@ function makeJointCosines(landmarks: readonly Vector3[]): number[] | undefined {
   return cosines;
 }
 
-function canonicalLandmarks(points: readonly Point3[]): { landmarks: Vector3[]; palmLength: number } | undefined {
+/**
+ * Builds the palm orientation in the same 3D camera/world space as the input points. Unlike the
+ * canonical hand-local coordinates, this basis deliberately preserves global rotation.
+ */
+export function palmBasis(points: readonly Point3[]): PalmBasis | undefined {
   if (points.length !== LANDMARK_COUNT || points.some((point) => !isFinitePoint(point))) return undefined;
 
   const wrist = points[0]!;
@@ -107,12 +122,18 @@ function canonicalLandmarks(points: readonly Point3[]): { landmarks: Vector3[]; 
   if (!xAxis) return undefined;
   const zAxis = unit(cross(xAxis, yAxis));
   if (!zAxis) return undefined;
+  return { xAxis, yAxis, zAxis, palmLength };
+}
 
+function canonicalLandmarks(points: readonly Point3[]): { landmarks: Vector3[]; palmLength: number } | undefined {
+  const basis = palmBasis(points);
+  if (!basis) return undefined;
+  const wrist = points[0]!;
   const landmarks = points.map((point) => {
-    const relative = scale(subtract(point, wrist), 1 / palmLength);
-    return { x: dot(relative, xAxis), y: dot(relative, yAxis), z: dot(relative, zAxis) };
+    const relative = scale(subtract(point, wrist), 1 / basis.palmLength);
+    return { x: dot(relative, basis.xAxis), y: dot(relative, basis.yAxis), z: dot(relative, basis.zAxis) };
   });
-  return { landmarks, palmLength };
+  return { landmarks, palmLength: basis.palmLength };
 }
 
 function imagePositionAndScale(points: readonly Point3[]): { position: Vector2; palmLength: number } | undefined {

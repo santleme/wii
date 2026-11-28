@@ -1,4 +1,16 @@
-import { OneEuroFilter, type Hand, type OneEuroOptions, type Point3 } from '@wii/spatial-core';
+import {
+  OneEuroFilter,
+  RotationalFlickDetector,
+  type Hand,
+  type OneEuroOptions,
+  type PalmBasis,
+  type Point3,
+  type RotationalFlickOptions,
+  type RotationalFlickPhase,
+  type RotationalFlickRejection,
+  type RotationalFlickState,
+  type RotationalHandShape,
+} from '@wii/spatial-core';
 import { clamp } from './math';
 
 export interface MenuHandSnapshot {
@@ -8,6 +20,10 @@ export interface MenuHandSnapshot {
   handednessScore?: number;
   /** bitmap.height / bitmap.width; corrige distâncias normalizadas fora do quadrado. */
   aspectY?: number;
+  /** Métricas 3D da mão no espaço da câmera, necessárias apenas para o flick rotacional. */
+  worldLandmarks?: readonly Point3[];
+  /** O gesto rotacional só é alimentado quando a HomeMenu expõe a roda interativa. */
+  rotationEnabled?: boolean;
 }
 
 export interface HandCursorZone {
@@ -32,6 +48,7 @@ export interface HandCursorOptions {
   backHoldMs?: number;
   fistEnterStraightness?: number;
   fistReleaseStraightness?: number;
+  rotation?: RotationalFlickOptions;
 }
 
 export interface HandCursorState {
@@ -47,6 +64,18 @@ export interface HandCursorState {
   pinchRelease: boolean;
   backProgress: number;
   activeZone: HandCursorZone;
+  rotationPhase: RotationalFlickPhase;
+  /** Velocidade sanitizada que o carrossel pode consumir, em deg/s. */
+  rotationAngularVelocity: number;
+  /** Velocidade física filtrada após sensibilidade, em deg/s; diagnóstico apenas. */
+  rotationFilteredAngularVelocity: number;
+  rotationRawAngularVelocity: number;
+  rotationDirection: -1 | 0 | 1;
+  rotationCurvature: number;
+  rotationHandShape: RotationalHandShape;
+  rotationRejectReason?: RotationalFlickRejection;
+  rotationDtMs?: number;
+  rotationOrientation?: PalmBasis;
 }
 
 const WRIST = 0;
@@ -66,8 +95,12 @@ const DEFAULT_ZONE: HandCursorZone = { minX: 0, maxX: 1, minY: 0, maxY: 1 };
 const DEFAULT_HAND_SMOOTHING: OneEuroOptions = { minCutoff: 1.0, beta: 5.0, derivativeCutoff: 1.0 };
 const SCALE_MIN = 0.1;
 const SCALE_MAX = 0.3;
-const MAX_MARGIN = 0.25;
+const MAX_MARGIN = 0.37;
 const SCALE_TAU_MS = 250;
+
+function rotationBlocksGestures(phase: RotationalFlickPhase): boolean {
+  return phase !== 'IDLE';
+}
 
 function finite(point: Point3 | undefined): point is Point3 {
   return point !== undefined && Number.isFinite(point.x) && Number.isFinite(point.y);
@@ -157,6 +190,7 @@ export class HandCursorDetector {
   private readonly pinchOffRatio: number;
   private readonly pinchCooldownMs: number;
   private readonly pinchPressMs: number;
+  private readonly rotationDetector: RotationalFlickDetector;
   private pinchActive = false;
   private pinchCandidateSinceMs?: number;
   private presenceMs = 0;
@@ -194,12 +228,15 @@ export class HandCursorDetector {
     this.pinchPressMs = options.pinchPressMs ?? 90;
     this.xFilter = new OneEuroFilter(options.smoothing ?? DEFAULT_HAND_SMOOTHING);
     this.yFilter = new OneEuroFilter(options.smoothing ?? DEFAULT_HAND_SMOOTHING);
+    // A imagem inferida não é espelhada, mas a prévia e o cursor são. O sinal negativo faz
+    // velocidade positiva significar rotação horária na experiência visual do usuário.
+    this.rotationDetector = new RotationalFlickDetector({ sensitivity: -1, ...(options.rotation ?? {}) });
   }
 
   update(snapshot: MenuHandSnapshot): HandCursorState {
     const aspectY = snapshot.aspectY ?? 1;
     const lowConfidence = snapshot.handednessScore !== undefined && snapshot.handednessScore < 0.75;
-    if (lowConfidence || !usableHand(snapshot.landmarks, aspectY)) return this.missing(snapshot.timestampMs);
+    if (lowConfidence || !usableHand(snapshot.landmarks, aspectY)) return this.missing(snapshot);
 
     const points = snapshot.landmarks;
     const timestampMs = snapshot.timestampMs;
@@ -254,6 +291,9 @@ export class HandCursorDetector {
     const smoothX = this.xFilter.filter(mapped.x, timestampMs);
     const smoothY = this.yFilter.filter(mapped.y, timestampMs);
 
+    const rotation = this.updateRotation(snapshot, true);
+    const rotationBlocking = rotationBlocksGestures(rotation.phase);
+
     const straightness = maxFingerStraightness(points, aspectY);
     if (straightness !== undefined && straightness >= this.fistReleaseStraightness) this.fistNeedsOpen = false;
 
@@ -293,7 +333,14 @@ export class HandCursorDetector {
           pinchRelease = true;
         }
       };
-      if (this.fistActive) {
+      if (rotationBlocking) {
+        this.pinchActive = false;
+        this.pinchCandidateSinceMs = undefined;
+        this.pinchNeedsRelease = true;
+        this.fistActive = false;
+        this.fistNeedsOpen = true;
+        this.backSinceMs = undefined;
+      } else if (this.fistActive) {
         this.fistActive = closedFist(points, true, this.fistEnterStraightness, this.fistReleaseStraightness, aspectY);
         fist = this.fistActive;
         if (fist) {
@@ -351,10 +398,10 @@ export class HandCursorDetector {
     }
 
     const candidate = { x: clamp(smoothX), y: clamp(smoothY) };
-    if (pinching || pinchCandidate || fist) this.frozenPosition ??= this.lastFreePosition ?? candidate;
+    if (pinching || pinchCandidate || fist || rotationBlocking) this.frozenPosition ??= this.lastFreePosition ?? candidate;
     else this.frozenPosition = undefined;
     const position = this.frozenPosition ?? candidate;
-    if (!pinching && !pinchCandidate && !fist) this.lastFreePosition = candidate;
+    if (!pinching && !pinchCandidate && !fist && !rotationBlocking) this.lastFreePosition = candidate;
     this.lastPosition = position;
     return {
       visible: this.synced,
@@ -366,6 +413,7 @@ export class HandCursorDetector {
       pinchRelease,
       backProgress,
       activeZone: { ...this.activeZone },
+      ...this.rotationOutput(rotation),
     };
   }
 
@@ -389,9 +437,12 @@ export class HandCursorDetector {
     this.yFilter.reset();
     this.pinchActive = false;
     this.pinchCandidateSinceMs = undefined;
+    this.rotationDetector.reset();
   }
 
-  private missing(timestampMs: number): HandCursorState {
+  private missing(snapshot: MenuHandSnapshot): HandCursorState {
+    const timestampMs = snapshot.timestampMs;
+    const rotation = this.updateRotation(snapshot, false);
     this.missingSinceMs ??= timestampMs;
     if (this.synced) {
       this.lostSinceMs ??= timestampMs;
@@ -420,6 +471,33 @@ export class HandCursorDetector {
       pinchRelease: false,
       backProgress: 0,
       activeZone: { ...this.activeZone },
+      ...this.rotationOutput(rotation),
+    };
+  }
+
+  private updateRotation(snapshot: MenuHandSnapshot, useWorldLandmarks: boolean): RotationalFlickState {
+    if (snapshot.rotationEnabled !== true) {
+      return this.rotationDetector.update({ timestampMs: snapshot.timestampMs, enabled: false });
+    }
+    return this.rotationDetector.update({
+      timestampMs: snapshot.timestampMs,
+      worldLandmarks: useWorldLandmarks ? snapshot.worldLandmarks : undefined,
+      handedness: snapshot.handedness,
+    });
+  }
+
+  private rotationOutput(rotation: RotationalFlickState) {
+    return {
+      rotationPhase: rotation.phase,
+      rotationAngularVelocity: rotation.controlAngularVelocityDegPerSec,
+      rotationFilteredAngularVelocity: rotation.angularVelocityDegPerSec,
+      rotationRawAngularVelocity: rotation.rawAngularVelocityDegPerSec,
+      rotationDirection: rotation.direction,
+      rotationCurvature: rotation.curvature,
+      rotationHandShape: rotation.handShape,
+      rotationRejectReason: rotation.rejectionReason,
+      rotationDtMs: rotation.dtMs,
+      rotationOrientation: rotation.orientation,
     };
   }
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import type { HandCursorInput } from './handCursorTypes';
+import { rotationBlocksHandInput, type HandCursorInput } from './handCursorTypes';
 
 const HOVER = 'data-hand-hover';
 
@@ -11,8 +11,8 @@ function targetAt(x: number, y: number): HTMLElement | null {
 
 /** Traduz o cursor de mão em hover, clique e voltar no DOM. */
 export function useHandHitTest(input: HandCursorInput, active: boolean, onBack: () => void) {
-  const { visible, x, y, pinchRelease, backProgress } = input;
-  const enabled = active && visible && input.synced;
+  const { visible, x, y, pinchRelease, backProgress, rotationPhase } = input;
+  const enabled = active && visible && input.synced && !rotationBlocksHandInput(rotationPhase);
   const hovered = useRef<HTMLElement | null>(null);
   const released = useRef(false);
   const backDone = useRef(false);

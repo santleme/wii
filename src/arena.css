@@ -30,6 +30,7 @@
   .ring-arrow.left { left: 3%; }
   .ring-arrow.right { right: 3%; }
   .ring-arrow:hover { box-shadow: 0 0 0 5px #34beed55, 0 5px 14px rgba(26, 110, 168, .35); }
+  .channel-ring.is-gesture-controlled .channel { transition: none; }
 
   .wii-bar { position: relative; flex: 0 0 clamp(130px, 25vh, 210px); text-align: center; }
   .wii-bar svg { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -39,10 +40,11 @@
   .wii-clock strong { font-size: clamp(22px, 4.5vh, 40px); }
   .wii-clock span { font-size: 14px; }
 
-  /* abrir o canal em etapas: 1) a roda se apaga, 2) o vidro cresce vazio, 3) o título entra na tela já montada */
-  .channels > .channel-ring, .channels > .wii-bar { transition: opacity .35s ease; }
-  .channels.is-opening > .channel-ring, .channels.is-opening > .wii-bar { opacity: 0; pointer-events: none; }
-  .channel-zoom { position: absolute; z-index: 15; border: 3px solid var(--blue); border-radius: 18px; background: var(--gloss); animation: channel-zoom .65s cubic-bezier(.6, 0, .2, 1) .3s both; }
+  /* entrar no canal: 1) a câmera avança sobre o botão, 2) o branco nasce no meio da tela, 3) os jogos caem já montados */
+  .channels.is-opening { overflow: hidden; pointer-events: none; }
+  .channels.is-opening > .channel-ring { transform-origin: var(--zx, 50%) var(--zy, 50%); animation: channel-approach 1.25s cubic-bezier(.55, 0, .75, .35) forwards; }
+  .channels.is-opening > .wii-bar { transition: transform .9s ease-in, opacity .6s ease-in; transform: translateY(35%); opacity: 0; }
+  .channel-whiteout { position: absolute; inset: 0; z-index: 30; background: radial-gradient(circle farthest-corner at 50% 50%, #fff 0, #fff calc(var(--wo) - 28%), #fff0 var(--wo)); animation: channel-whiteout .8s cubic-bezier(.45, 0, .3, 1) .55s both; }
 
   /* a tela em si não esmaece (nada de ver o que ficou atrás); só o conteúdo dela surge */
   .menu.title { animation: none; }
@@ -72,6 +74,29 @@
   .preview.track .scene, .preview.athletics .scene { background: linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #4e9e52 42% 52%, #0000 52%), repeating-linear-gradient(#c8603f 0 13%, #fff 13% 14%); }
   .preview.boxing .scene { background: radial-gradient(circle at 38% 58%, #d64545 0 9%, #0000 9.5%), radial-gradient(circle at 62% 58%, #2f6fd0 0 9%, #0000 9.5%), repeating-linear-gradient(#0000 0 8%, #fff 8% 9.5%, #0000 9.5% 14%) 50% 70% / 100% 40% no-repeat, linear-gradient(#26313b 0 52%, #d9c9a3 52%); }
   .preview figcaption { padding: 12px; text-align: center; font-weight: 700; }
+
+  /* jogos: roda de cartões, o mesmo vocabulário do carrossel do menu inicial */
+  .games-body { position: relative; flex-direction: column; flex-wrap: nowrap; gap: 0; padding: 0; overflow: hidden; }
+  .games-ring { position: relative; flex: 1; width: 100%; min-height: 300px; }
+  .game-card { position: absolute; width: min(400px, 36vw); display: flex; flex-direction: column; overflow: hidden; padding: 0; border: 6px solid #fff; border-radius: 24px; background: #fff; color: var(--ink); box-shadow: 0 8px 24px #0b4a6e66; transition: left .7s cubic-bezier(.3, .8, .2, 1), top .7s cubic-bezier(.3, .8, .2, 1), transform .7s cubic-bezier(.3, .8, .2, 1), opacity .7s, box-shadow .25s; }
+  .game-card .scene { display: block; width: 100%; }
+  .game-card .game-name { display: block; padding: 12px; text-align: center; font-size: clamp(18px, 2.2vw, 28px); font-weight: 800; background: var(--gloss); }
+  .game-card.is-front { box-shadow: 0 12px 30px #0b4a6e80, 0 0 0 5px #34beed88; }
+  .game-card.is-front:hover, .game-card.is-front:focus-visible { box-shadow: 0 14px 34px #0b4a6e99, 0 0 0 8px #ffffffcc; }
+  .game-card:not(.is-front) { cursor: pointer; }
+  .game-card.tennis .scene { background: linear-gradient(90deg, #0000 49.6%, #fff 49.6% 50.4%, #0000 50.4%) 50% 100% / 100% 40% no-repeat, linear-gradient(#0000 68%, #fff 68% 70%, #0000 70%), linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #3f8f4b 42% 48%, #3f78b5 48%); }
+  .game-card.athletics .scene { background: linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #4e9e52 42% 52%, #0000 52%), repeating-linear-gradient(#c8603f 0 13%, #fff 13% 14%); }
+  .game-card.boxing .scene { background: radial-gradient(circle at 38% 58%, #d64545 0 9%, #0000 9.5%), radial-gradient(circle at 62% 58%, #2f6fd0 0 9%, #0000 9.5%), repeating-linear-gradient(#0000 0 8%, #fff 8% 9.5%, #0000 9.5% 14%) 50% 70% / 100% 40% no-repeat, linear-gradient(#26313b 0 52%, #d9c9a3 52%); }
+  /* chegada: nasce do branco e os cartões caem e quicam */
+  .menu.sports-menu { animation: none; }
+  .menu.sports-menu::after { content: ''; position: absolute; inset: 0; z-index: 40; background: #fff; pointer-events: none; animation: games-from-white .8s ease-out both; }
+  .game-card { animation: game-drop 1.15s both; }
+  .game-card:nth-of-type(1) { animation-delay: .12s; }
+  .game-card:nth-of-type(2) { animation-delay: .26s; }
+  .game-card:nth-of-type(3) { animation-delay: .4s; }
+  .games-hint, .games-back, .games-ring .ring-arrow { animation: games-fade .5s ease-out 1s both; }
+  .games-hint { position: relative; z-index: 21; margin: 0; padding: 0 4vw 28px; text-align: center; color: #fff; font-size: 18px; font-weight: 700; text-shadow: 0 1px 3px #0b4a6e99; }
+  .games-back { position: absolute; z-index: 22; left: 4vw; bottom: 24px; padding: 8px 24px; font-size: 16px; }
 
   /* jogo em tela cheia */
   .game-viewport { position: absolute; inset: 0; }
@@ -163,9 +188,20 @@
   .hand-cursor.synced .track { stroke: var(--green); stroke-width: 3; }
   .hand-icon { position: absolute; left: -17.5px; top: -1.25px; width: 40px; height: 50px; fill: #fff; stroke: var(--blue-deep); stroke-width: 2.5; stroke-linejoin: round; filter: drop-shadow(0 3px 4px #4a606e66); }
   .hand-cursor.pinching .hand-icon { fill: #c9f1fb; }
+  .hand-cursor.rotating .hand-body { opacity: .58; scale: .82; transition-duration: .12s; }
+  .hand-cursor.rotation-candidate .hand-ring .track { stroke: var(--orange); }
+  .hand-cursor.rotating .hand-ring .fill, .hand-cursor.braking .hand-ring .fill { opacity: 1; stroke: var(--orange); stroke-dasharray: 10 12; animation: hand-orbit 1s linear infinite; }
+  .hand-cursor.braking .hand-icon { fill: #ffe4c2; }
+  .hand-rotation-badge { left: -38px; top: 32px; background: var(--blue-deep); font-size: 15px; }
+  .hand-cursor.braking .hand-rotation-badge { background: var(--orange); }
   .hand-pulse { position: absolute; left: -18px; top: -18px; width: 36px; height: 36px; border: 3px solid var(--blue-deep); border-radius: 999px; animation: hand-pulse .8s ease-out infinite; }
   .hand-badge { position: absolute; left: 18px; top: 34px; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 999px; background: var(--orange); color: #fff; font-size: 14px; font-weight: 800; }
   .hand-flash { position: absolute; left: -24px; top: -24px; width: 48px; height: 48px; border: 4px solid var(--blue); border-radius: 999px; background: #34beed55; animation: hand-flash .4s ease-out forwards; }
+  .hand-debug { position: absolute; left: 12px; bottom: 12px; z-index: 130; width: min(360px, calc(100vw - 24px)); max-height: 48vh; overflow: auto; padding: 10px 12px; border: 2px solid var(--blue-deep); border-radius: 12px; background: #fffffff0; box-shadow: var(--shadow); font-size: 11px; line-height: 1.35; pointer-events: none; }
+  .hand-debug strong { display: block; margin-bottom: 5px; color: var(--blue-deep); text-transform: uppercase; letter-spacing: .8px; }
+  .hand-debug dl { display: grid; grid-template-columns: 105px 1fr; gap: 2px 8px; margin: 0; }
+  .hand-debug dt { color: var(--muted); font-weight: 700; }
+  .hand-debug dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
   /* pip da câmera */
   .cam-pip { position: absolute; right: 14px; bottom: 14px; width: 230px; z-index: 10; overflow: hidden; border: 3px solid var(--blue); border-radius: 18px; background: var(--gloss); box-shadow: 0 10px 28px #2a4a5c66; }
@@ -226,11 +262,12 @@
   .wii-half.left { clip-path: inset(0 50% 0 0); --open: -50%; }
   .wii-half.right { clip-path: inset(0 0 0 50%); --open: 50%; }
   .wii-half span { color: transparent; background: linear-gradient(#34beed 25%, #1a8fc4 75%); -webkit-background-clip: text; background-clip: text; font: 700 clamp(90px, 22vw, 260px)/1 Arial, sans-serif; letter-spacing: -.04em; animation: wii-come .6s cubic-bezier(.2, .9, .3, 1.15) .5s backwards, wii-near .6s ease-in 1.5s forwards; }
-  @media (prefers-reduced-motion: reduce) { .menu, .title .title-card .logo, .title .stripes, .title .title-actions { animation: none; } .wii-btn, .channel { transition: none; } .hand-body { transition: none; } .hand-status[data-state="searching"] i, .hand-cursor.searching .track, .hand-cursor.syncing .track, .hand-pulse { animation: none; } .hand-flash { animation-name: hand-flash-still; } }
+  @media (prefers-reduced-motion: reduce) { .menu, .title .title-card .logo, .title .stripes, .title .title-actions { animation: none; } .wii-btn, .channel { transition: none; } .hand-body { transition: none; } .hand-status[data-state="searching"] i, .hand-cursor.searching .track, .hand-cursor.syncing .track, .hand-pulse, .hand-cursor.rotating .hand-ring .fill, .hand-cursor.braking .hand-ring .fill { animation: none; } .hand-flash { animation-name: hand-flash-still; } }
 }
 @keyframes menu-in { from { opacity: 0; transform: scale(.97); } }
 @keyframes hand-blink { 50% { opacity: .3; transform: scale(.7); } }
 @keyframes hand-blink-ring { 50% { opacity: .3; } }
+@keyframes hand-orbit { to { stroke-dashoffset: -22; } }
 @keyframes hand-pulse { from { opacity: .9; transform: scale(.5); } to { opacity: 0; transform: scale(1.25); } }
 @keyframes hand-flash { from { opacity: 1; scale: .4; } to { opacity: 0; scale: 1.5; } }
 @keyframes hand-flash-still { 0%, 60% { opacity: 1; } 100% { opacity: 0; } }
@@ -241,8 +278,39 @@
   background: linear-gradient(#ffffffd9 0 46%, #ffffff00 52%), linear-gradient(#f4fafd, #ade4f8);
   box-shadow: 0 4px 12px rgba(26, 110, 168, .35), inset 0 1px 1px #fff, inset 0 -6px 10px #34beed55;
 }
+.arena-page .arena-exit {
+  isolation: isolate;
+  transition: transform .45s cubic-bezier(.22, 1, .36, 1), box-shadow .45s cubic-bezier(.22, 1, .36, 1);
+}
+/* O azul vive numa camada própria: gradientes não animam, a opacidade sim. */
+.arena-page .arena-exit::before {
+  content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none; opacity: 0;
+  background: linear-gradient(#ffffffd9 0 40%, #ffffff00 50%), linear-gradient(#bdeafb, #34beed);
+  box-shadow: inset 0 -8px 14px #1fa6dc99;
+  transition: opacity .45s ease;
+}
+.arena-page .arena-exit:hover, .arena-page .arena-exit:focus-visible {
+  transform: translateY(-3px);
+  box-shadow: 0 10px 14px -4px rgba(26, 110, 168, .5), 0 3px 6px rgba(26, 110, 168, .3), inset 0 1px 1px #fff, inset 0 -6px 10px #34beed55;
+}
+.arena-page .arena-exit:hover::before, .arena-page .arena-exit:focus-visible::before { opacity: 1; }
+.arena-page .arena-exit:active { transform: translateY(-1px); transition-duration: .12s; }
+@media (prefers-reduced-motion: reduce) { .arena-page .arena-exit, .arena-page .arena-exit::before { transition: none; } }
 @keyframes title-actions-in { from { opacity: 0; } }
-@keyframes channel-zoom { to { left: 0; top: 0; width: 100%; height: 100%; border-width: 0; border-radius: 0; } }
+@media (prefers-reduced-motion: reduce) { .arena .menu.sports-menu::after { display: none; } .arena .game-card, .arena .games-hint, .arena .games-back, .arena .games-ring .ring-arrow { animation: none; } }
+@property --wo { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+@keyframes games-from-white { to { opacity: 0; } }
+@keyframes games-fade { from { opacity: 0; } }
+@keyframes game-drop {
+  0% { translate: 0 -80vh; animation-timing-function: cubic-bezier(.5, 0, 1, .6); }
+  50% { translate: 0 0; animation-timing-function: cubic-bezier(0, .4, .5, 1); }
+  66% { translate: 0 -8%; animation-timing-function: cubic-bezier(.5, 0, 1, .6); }
+  80% { translate: 0 0; animation-timing-function: cubic-bezier(0, .4, .5, 1); }
+  90% { translate: 0 -2.5%; animation-timing-function: cubic-bezier(.5, 0, 1, .6); }
+  100% { translate: 0 0; }
+}
+@keyframes channel-approach { to { transform: scale(5); } }
+@keyframes channel-whiteout { from { --wo: 0%; } to { --wo: 135%; } }
 @keyframes wii-come { from { opacity: 0; filter: blur(14px); transform: scale(.08); } }
 @keyframes wii-near { to { transform: scale(1.5); } }
 @keyframes wii-open { to { transform: translateX(var(--open)); } }

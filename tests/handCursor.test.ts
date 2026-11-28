@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { HandCursorDetector, type MenuHandSnapshot } from '../src/kinematics/handCursor';
 import { emptyHand, hand } from './fixtures/menuHand';
+import { rotationalWorldLandmarks } from './fixtures/rotationalHand';
 
 function synched(detector = new HandCursorDetector()) {
   for (let time = 0; time <= 1000; time += 100) detector.update(hand(time));
@@ -180,15 +181,15 @@ describe('hand cursor hand validation', () => {
 describe('hand cursor distance-sensitive active zone', () => {
   it('shrinks the zone for a close hand so the screen edge is reached before the camera edge', () => {
     const detector = new HandCursorDetector();
-    let state = detector.update(hand(0, { scale: 0.3, tipX: 0.25, tipY: 0.5 }));
+    let state = detector.update(hand(0, { scale: 0.3, tipX: 0.37, tipY: 0.5 }));
     for (let time = 100; time <= 1000; time += 100) {
-      state = detector.update(hand(time, { scale: 0.3, tipX: 0.25, tipY: 0.5 }));
+      state = detector.update(hand(time, { scale: 0.3, tipX: 0.37, tipY: 0.5 }));
     }
-    expect(state.activeZone.minX).toBeCloseTo(0.25);
-    expect(state.activeZone.maxX).toBeCloseTo(0.75);
-    expect(state.activeZone.minY).toBeCloseTo(0.25);
-    expect(state.activeZone.maxY).toBeCloseTo(0.75);
-    // camera x 0.25 mirrors to pointer x 0.75, the inner edge of the shrunk zone
+    expect(state.activeZone.minX).toBeCloseTo(0.37);
+    expect(state.activeZone.maxX).toBeCloseTo(0.63);
+    expect(state.activeZone.minY).toBeCloseTo(0.37);
+    expect(state.activeZone.maxY).toBeCloseTo(0.63);
+    // camera x 0.37 mirrors to pointer x 0.63, the inner edge of the shrunk zone
     expect(state.x).toBeCloseTo(1);
   });
 
@@ -465,5 +466,108 @@ describe('hand cursor closed-fist back gesture', () => {
     const before = detector.update(hand(1100, { tipX: 0.4, tipY: 0.4 }));
     const held = detector.update(hand(1200, { tipX: 0.7, tipY: 0.7, curl: 1 }));
     expect(held).toMatchObject({ x: before.x, y: before.y, backProgress: 0 });
+  });
+});
+
+describe('hand cursor rotational flick arbitration', () => {
+  const rotationalMenuHand = (
+    timestampMs: number,
+    angleDeg: number,
+    options: {
+      curl?: number;
+      pinchRatio?: number;
+      tipX?: number;
+      rotationEnabled?: boolean;
+      imageCurl?: number;
+    } = {},
+  ): MenuHandSnapshot => ({
+    ...hand(timestampMs, {
+      pinchRatio: options.pinchRatio ?? 0.8,
+      tipX: options.tipX,
+      curl: options.imageCurl ?? 0,
+    }),
+    worldLandmarks: rotationalWorldLandmarks(angleDeg, options.curl ?? 0.65),
+    rotationEnabled: options.rotationEnabled ?? true,
+  });
+
+  const syncRotational = (detector = new HandCursorDetector()) => {
+    for (let time = 0; time <= 200; time += 100) detector.update(rotationalMenuHand(time, 0));
+    return detector;
+  };
+
+  const rotate = (
+    detector: HandCursorDetector,
+    startMs: number,
+    frames: number,
+    options: Parameters<typeof rotationalMenuHand>[2] = {},
+  ) => {
+    const states = [];
+    for (let frame = 0; frame < frames; frame += 1) {
+      states.push(detector.update(rotationalMenuHand(startMs + frame * 16, frame * 3, options)));
+    }
+    return states;
+  };
+
+  it('keeps the rotational detector idle when rotationEnabled is false', () => {
+    const detector = new HandCursorDetector();
+    for (let time = 0; time <= 200; time += 100) detector.update(rotationalMenuHand(time, 0, { rotationEnabled: false }));
+    const states = rotate(detector, 216, 12, { rotationEnabled: false });
+    expect(states.every((state) => state.rotationPhase === 'IDLE')).toBe(true);
+    expect(states.every((state) => state.rotationAngularVelocity === 0)).toBe(true);
+  });
+
+  it('publishes phase, direction, and carousel-ready velocity for a cupped rotational impulse', () => {
+    const detector = syncRotational();
+    const states = rotate(detector, 216, 12);
+    const rotating = states.find((state) => state.rotationPhase === 'ROTATING');
+    expect(rotating).toBeDefined();
+    expect(rotating!.rotationDirection).toBe(-1); // positive fixture rotation is counterclockwise in the mirrored preview
+    expect(rotating!.rotationAngularVelocity).toBeLessThan(0);
+    expect(rotating!.rotationRawAngularVelocity).toBeGreaterThan(0);
+  });
+
+  it('suppresses a held pinch during rotation and requires release before the next click', () => {
+    const detector = syncRotational();
+    const rotating = rotate(detector, 216, 12, { pinchRatio: 0.2 });
+    expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
+    expect(rotating.every((state) => !state.pinchRelease && !state.pinching)).toBe(true);
+
+    const stillHeld = detector.update(rotationalMenuHand(500, 33, { pinchRatio: 0.2, rotationEnabled: false }));
+    expect(stillHeld).toMatchObject({ pinchRelease: false, pinching: false });
+    detector.update(rotationalMenuHand(516, 33, { pinchRatio: 0.8, rotationEnabled: false }));
+    detector.update(rotationalMenuHand(532, 33, { pinchRatio: 0.2, rotationEnabled: false }));
+    const rearmed = detector.update(rotationalMenuHand(632, 33, { pinchRatio: 0.2, rotationEnabled: false }));
+    expect(rearmed.pinchRelease).toBe(true);
+  });
+
+  it('keeps back progress at zero during rotation and re-arms the fist afterwards', () => {
+    const detector = syncRotational();
+    const rotating = rotate(detector, 216, 12, { imageCurl: 1, pinchRatio: 0.2 });
+    expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
+    expect(rotating.every((state) => state.backProgress === 0)).toBe(true);
+    const after = detector.update(rotationalMenuHand(500, 33, { imageCurl: 1, pinchRatio: 0.2, rotationEnabled: false }));
+    expect(after.backProgress).toBe(0);
+  });
+
+  it('freezes the cursor position while rotation owns the hand', () => {
+    const detector = syncRotational();
+    const before = detector.update(rotationalMenuHand(216, 0, { tipX: 0.5 }));
+    const moving = [];
+    for (let frame = 1; frame < 12; frame += 1) {
+      moving.push(detector.update(rotationalMenuHand(216 + frame * 16, frame * 3, { tipX: 0.5 + frame * 0.02 })));
+    }
+    const active = moving.filter((state) => state.rotationPhase !== 'IDLE');
+    expect(active.length).toBeGreaterThan(0);
+    expect(active.every((state) => state.x === before.x && state.y === before.y)).toBe(true);
+  });
+
+  it('cancels rotation on tracking loss instead of leaving velocity or gestures armed', () => {
+    const detector = syncRotational();
+    const rotating = rotate(detector, 216, 12);
+    expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
+    const lost = detector.update({ ...emptyHand(400), rotationEnabled: true });
+    expect(lost.rotationPhase).toBe('CANCELLED');
+    expect(lost.rotationRejectReason).toBe('missing-hand');
+    expect(lost).toMatchObject({ pinchRelease: false, backProgress: 0, rotationAngularVelocity: 0 });
   });
 });

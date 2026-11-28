@@ -1,8 +1,18 @@
 export { OneEuroFilter } from './filters/oneEuroFilter';
 export type { OneEuroOptions } from './filters/oneEuroFilter';
-export { HandFeatureExtractor } from './geometry/handFeatures';
-export type { CanonicalHandFeatures, HandFeatureOptions, Vector2, Vector3 } from './geometry/handFeatures';
+export { HandFeatureExtractor, palmBasis } from './geometry/handFeatures';
+export type { CanonicalHandFeatures, HandFeatureOptions, PalmBasis, Vector2, Vector3 } from './geometry/handFeatures';
 export { BimanualSeparationTracker, MagneticSnapFilter, bimanualSeparationRatio } from './intent/bimanualControls';
+export { DEFAULT_ROTATIONAL_FLICK_CONFIG, RotationalFlickDetector } from './intent/rotationalFlickDetector';
+export type {
+  RotationalFlickConfig,
+  RotationalFlickOptions,
+  RotationalFlickPhase,
+  RotationalFlickRejection,
+  RotationalFlickSample,
+  RotationalFlickState,
+  RotationalHandShape,
+} from './intent/rotationalFlickDetector';
 export type { ImageDimensions } from './intent/bimanualControls';
 export { HandIntentEngine } from './intent/handIntentEngine';
 export type { HandIntentOptions } from './intent/handIntentEngine';
