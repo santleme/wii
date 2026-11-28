@@ -4,6 +4,65 @@ Data: 27 de novembro de 2026 · Base estudada: `origin/main` `94ffaaa`. Document
 
 ---
 
+## Pivot para o núcleo: soco, bloqueio e esquiva (pesquisa de 28/11/2026)
+
+### A pergunta que reorganiza o projeto
+
+O usuário colocou o dedo na ferida de produto: o jogo não precisa da taxonomia completa de golpes — precisa do **ritmo básico funcionando**: soco, soco, bloqueio, esquiva. A pesquisa abaixo valida o instinto com três evidências independentes.
+
+### Evidência 1 — o jogo já degrada graciosamente (auditoria de código)
+
+A classificação de tipo/alvo é camada de modulação, não núcleo:
+
+- `boxingRules.applyPlayerPunch`: "anything unrecognized degrades to the generic straight-to-the-head behavior" — um soco `unknown` já é um soco completo nas regras;
+- tipo/alvo apenas modulam: uppercut +25% em abertura, gancho penetra metade da guarda, corpo 75%;
+- modo saco nem consome tipo — só potência e mão;
+- o único consumidor que exige tipo correto é o **tutorial** — paradoxalmente o lugar onde a classificação é menos confiável, punindo o usuário com "TENTE DE NOVO" quando ele acertou o golpe.
+
+### Evidência 2 — os jogos de referência são deliberadamente fuzzy (pesquisa externa)
+
+- Wii Sports Boxing rodava em acelerômetros de 2006 com detecção intencionalmente frouxa: "the emphasis of the system is to create fun and engaging game play mechanic rather than forcing the user to learn complex motions" — o boxe era "especially fuzzy", ignorando metade dos abanões frenéticos, e os jogadores se adaptavam socando com mais intenção;
+- mesmo com acelerômetro direto na mão a 60 Hz (sinal infinitamente mais limpo que visão monocular), trabalhos acadêmicos precisavam de calibração por template para classificar tipos — a lição: **fidelidade de classificação é cara até com sensor dedicado; ritmo e resposta são o que fazem diversão**;
+- conclusão de design: o jogo deve ser robusto a detecção fuzzy, não depender de classificação precisa.
+
+### Evidência 3 — a metade defensiva do loop está morta (medição na gravação real)
+
+Medição dos canais contínuos (`controls.dodgeZone`, `controls.duck`, `controls.guard`) por segmento da segunda gravação roteirizada:
+
+| canal | onde deveria ligar | onde liga de fato |
+|---|---|---|
+| `duck` | segmento duck | **0% — nunca liga**; único lugar que dispara é occlusion (41%, ruído) |
+| `dodgeZone` (slip) | segmento slip | **15%** — menos que os 19% de ruído em bodyshot e 48% em occlusion |
+| `guard` | segmento guard | ~49-64% — e ~49% também em `still`, onde deveria ser ~0%: detecção ruidosa dominada por flicker, sem histerese |
+
+Ou seja: **agachar não existe no jogo, slip mal existe, e o bloqueio pisca**. Toda a matriz de defesa, o risco/recompensa e os ataques tipados do oponente são decoração sobre uma entrada inexistente. Enquanto isso o soco — o canal que recebeu todo o investimento — está em 71% de recall com precisão razoável. O investimento estava invertido.
+
+### Mecanismos identificados (leitura de código)
+
+1. **DuckTracker**: a baseline de altura exige janelas contínuas de imobilidade (`DUCK_BASELINE_STILL_MS` com spread pequeno) — inexistentes numa sessão de boxe em movimento constante. Sem baseline, `update` retorna `undefined` e o canal está morto. A adaptação posterior (taxa 0.2) depende das mesmas janelas raras.
+2. **Guard**: checagem geométrica instantânea por frame, sem histerese temporal — qualquer ruído de reconstrução liga/desliga o bloqueio a cada frame.
+3. **DodgeZone**: compartilha a calibração de lane, que também se adapta em janelas de imobilidade; socos com rotação de tronco deslocam o centro estimado e contaminam o canal.
+
+### Plano de implementação (em ordem de alavanca)
+
+1. **Duck que funciona**: baseline adaptativa que não dependa de imobilidade longa — candidatos: mediana móvel de janelas curtas, ou referência de altura pela cabeça/quadris em vez de ombros absolutos. Critério de aceite: ≥60% dos frames do segmento de duck da gravação real, ≤5% em still/guard/prepare.
+2. **Guard com histerese**: entrada e saída com dwells temporais distintos (entra rápido para bloquear, sai devagar para não piscar), medido na gravação: ≥80% no segmento de guard, ≤15% em cross/hook.
+3. **Slip calibrado**: investigar a deriva da lane calibration sob rotação de tronco; possivelmente congelar a lane durante janelas de soco (o soco não é deslocamento de base).
+4. **Precisão do soco em defesa**: o phantom de slip (o punho acompanha o tronco de verdade — movimento real) precisa de um discriminante; candidato: suprimir confirmação enquanto `dodgeZone`/slip estiver ativo, aceitando o custo físico (soco durante slip pleno é raro).
+5. **Tutorial simplificado**: ensinar o ritmo (guarda → soco → defesa) em vez de taxonomia perfeita; o passo de uppercut não pode exigir o que o detector não vê.
+
+### Resultados negativos e armadilhas medidos (28/11/2026)
+
+1. **Histerese temporal do bloqueio — testada e rejeitada**: a leitura geométrica do guarda já é positiva ~50% dos frames até em `still` (a postura natural de quem boxeia tem as mãos semi-erguidas e passa na geometria). A histerese implementada (entra com 120 ms contínuos, sai com 400 ms) não validou: `guard` ficou em 53%, `still` continuou 53% — amplificada no lado errado. A correção real é **geométrica** (posição mais restrita ou evidência de punho-perto-do-rosto), não temporal — redesenho com iteração contra a gravação.
+2. **O sinal de altura de duck inverte com inclinação para frente**: na gravação real o usuário agacha inclinando o tronco para a câmera — a perspectiva sobe os ombros na imagem e a largura dos ombros cresce, então o y normalizado *cai* ao agachar (1,27 agachado vs ~2,0 de pé) em vez de subir. Duck-com-inclinação é genuinamente ambíguo em espaço de imagem — candidatos: canal de largura dos ombros, profundidade da cabeça relativa, ou sinal combinado. O spike de occlusion (y=5,58) exige rejeição de outlier em qualquer design.
+3. **O sinal bruto de duck existe e é grande**: queda de ~0,7 sw contra limiar de 0,18 — o problema nunca foi sensibilidade, é baseline + inversão.
+
+### Explicitamente fora do escopo
+
+- Uppercut por eixo de medição próprio — redesenho grande, adiado até o núcleo estar sólido;
+- classificação fina hook-vs-straight — modulação, não núcleo;
+- bent-stop da caminhada (já testado e rejeitado com evidência).
+
 ## 0. Status de implementação (27/11/2026, branch `research/boxing-tracking-plan`)
 
 Implementado e com testes verdes (`npm test && npm run lint && npm run build`):
@@ -513,3 +572,35 @@ A ordem evita o caminho tentador e errado: inventar interações de jogo em cima
 3. **Guarda baixa entra já?** Recomendação: não antes da validação de alvo; guarda alta + recuo bastam para golpes de corpo na primeira iteração.
 4. **Usar BoxingVI sem licença explícita?** Pode ser usado para avaliação interna se o download for acessível, mas nada de redistribuir; pedir/licenciar ou preferir Zenodo CC BY para artefatos públicos.
 5. **Quando endurecer `PunchDetector`?** Somente depois dos contadores de falha mostrarem a causa; não usar a taxa 14/32 como desculpa para ajuste cego.
+
+
+## Resultados da implementação do núcleo (sessão 3)
+
+### Duck: de 0% a detecção correta com zero falsos positivos — RESOLVIDO
+
+O redesign saiu da análise multicanal das duas gravações (subagente independente, validado em ~1750 frames negativos): um duck é **queda do quadril fora da banda de pé E pitch frontal do tronco**, os dois em conjunto. Nenhum dos canais sozinho separa — weave lateral inclina sem derrubar o quadril, inclinar-se à câmera derruba o quadril na imagem sem pitch — mas o E dos dois é limpo. Implementação: `hipDrop` normalizado pelo comprimento cabeça–quadril da baseline rolling (percentil 15 da janela de 8 s — estar de pé é o topo da banda, não depende de imobilidade) ≥ 0,12 E pitch do vetor quadril→ombros em world landmarks ≥ 15°, sustentado 2 frames, histerese de saída.
+
+Medido na gravação real: **4-5 frames positivos por segmento de duck** — exatamente o conteúdo real (as janelas de duck do roteiro são majoritariamente weaves/em pé; os agachamentos profundos duram ~1 s cada) — e **zero frames positivos em todos os outros segmentos** das duas gravações.
+
+Dois achados de fiação, não de sinal:
+
+1. **O gate de footwork matava o duck no momento do duck**: agachamento profundo tira as pernas do quadro → tracking de footwork cai → o gate fecha → detecção morta exatamente quando necessária. O tracker é auto-normalizado e saiu do gate.
+2. **O freeze de `punching` era obsoleto**: protegia contra falso duck por queda de ombro em soco — irrelevante nos canais novos, porque soco não derruba quadril. E pior: onsets phantom na descida do duck congelavam o estado em false pela janela inteira.
+
+### Bloqueio: geometria de cobertura do rosto — RESOLVIDO (precisão)
+
+A banda de altura antiga (-0,35..+0,9) lia positivo até parado. O discriminante medido: na guarda real os dois punhos ficam a 0,33-0,46 larguras de ombro do nariz; em socos e braços soltos passam muito de 0,6. Nova geometria: distância punho-nariz ≤ 0,6 sw + cotovelo dobrado, em world landmarks (independente de vista). Precisão medida: cross/hook/slip/occlusion ~0% de positivos. No coração do segmento de guarda a detecção é contínua; frames de `still` positivos são detecção correta — punhos perto do rosto geometricamente SÃO uma guarda.
+
+### Phantom de soco na guarda: resultado negativo documentado
+
+O veto de distância ao nariz no contato foi implementado e medido: o phantom da guarda tem contato a 1,00 sw do nariz — dentro da faixa dos socos reais (0,75-2,07). Não discrimina. O phantom é movimento genuinamente punch-like (item 4 segue aberto); o floor codifica o teto de 1 phantom por gravação, mesma convenção do onset-race de duck.
+
+### Esquiva lateral (slip): RESOLVIDO — com tradeoff documentado
+
+Três mudanças, cada uma validada na gravação:
+
+1. **Limiar de entrada 0,12 → 0,35 larguras de ombro.** O limiar antigo media "slips de técnico de boxe" (5 cm) que qualquer postura atravessa — 86-94% de ruído nas janelas de soco. A varredura mostrou o joelho em 0,35: recall genuíno cai só de 76→72% enquanto todo ruído de soco e de quietude zera. Jogadores esquivam com weaves grandes, não com slips de manual — o limiar do jogo reflete como pessoas se movem (confirmando a pesquisa de referência: jogos de movimento bem-sucedidos exigem movimento amplo).
+2. **Centro rolling em vez do centro calibrado fixo.** A zona media deslocamento contra `shoulderCenterX0` fixo; a base real do jogador deriva constantemente — na gravação 1 a zona travou ligada o tempo inteiro. A baseline agora é a mediana rolling da janela de 6 s com adaptação baseada em tempo (tau 1,2 s em zona 0): drift de postura absorve, slip rápido vence a absorção.
+3. **Desgated do footwork** — mesmo bug estrutural do duck: o gate exigia confiança de quadril, que degrada exatamente durante movimento lateral vigoroso.
+
+**O tradeoff assumido (decisão de escopo do usuário: defesa acima de circling):** um lean segurado é fisicamente indistinguível de mudança de base num canal puramente posicional. Para que uma postura de luta inclinada nunca trave a zona ligada (invencibilidade), a base continua seguindo mesmo durante zona ativa — 5x mais devagar. Consequência: circling em rajadas de alguns segundos funciona; holds permanentes absorvem em ~7-10 s. Inversão pós-hold evitada pela absorção lenta. Medido: recall de slip 22-46 frames/segmento nas duas gravações, jab/cross/hook/uppercut com ruído 0-1 frames na gravação 2 e residuais de 10-13 frames em janelas isoladas da gravação 1 (deslocamento corporal genuíno no ritmo de luta — o modelo físico estilo TotF tolera: deslocamento é deslocamento).

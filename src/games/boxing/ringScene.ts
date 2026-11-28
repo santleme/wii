@@ -348,7 +348,7 @@ export function buildBoxingRing(
   scene.environmentIntensity = 0.45;
   scene.fog = new THREE.Fog(0x07111f, 24, 58);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.shadowMap.enabled = true;
 
   const root = new THREE.Group();

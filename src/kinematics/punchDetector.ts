@@ -154,33 +154,39 @@ function elbowCosine(shoulder: Point3, elbow: Point3, wrist: Point3): number | u
  * checked only against synthetic poses.
  */
 export const GUARD_THRESHOLDS = {
-  /** Wrist height window: from just below the shoulder up to around the forehead. */
-  minWristHeight: -0.35,
-  maxWristHeight: 0.9,
-  /** Sideways distance from the shoulder; wider than this the fist is not covering anything. */
-  maxWristSide: 0.8,
-  /** The arm must be folded: an extended arm at shoulder height is a punch, not a guard. */
+  /** A guarding fist covers the face: within this many image shoulder widths of the nose. Measured
+   * on the scripted recording: deliberate guard holds 0.33-0.46, punches and hanging arms go far past it. */
+  maxWristToNoseSw: 0.6,
+  /** The arm must be folded: an extended arm near the face is a punch follow-through, not a guard. */
   maxElbowCosine: 0.3,
   minConfidence: 0.5,
 } as const;
 
-/** True when both fists are up near shoulder or chin height with the arms folded. */
+/**
+ * True when both fists cover the face with the arms folded — the guard that actually blocks.
+ * Measured in image space against the nose, not a shoulder-relative height band: a bent arm at
+ * chest height is how a boxer naturally stands, so the old loose band read positive half the
+ * time even at rest. The face-proximity distribution in the reference recording is tight
+ * (0.33-0.46 shoulder widths in deliberate guard) and far in every negative.
+ */
 export function isGuardingPose(snapshot: PoseSnapshot, calibration: CalibrationProfile): boolean {
   const world = snapshot.worldLandmarks;
-  const [leftShoulder, rightShoulder, leftHip, rightHip] = [world[11], world[12], world[23], world[24]];
-  if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return false;
+  const nose = world[0];
+  const [leftShoulder, rightShoulder] = [world[11], world[12]];
+  if (!nose || !leftShoulder || !rightShoulder) return false;
+  if ((nose.visibility ?? 0) < GUARD_THRESHOLDS.minConfidence) return false;
+  const width = calibration.world.shoulderWidth;
+  if (!Number.isFinite(width) || width < 1e-4) return false;
   return BODY_JOINTS.slice(0, 2).every(([, shoulderIndex, elbowIndex, wristIndex]) => {
     const shoulder = world[shoulderIndex];
     const elbow = world[elbowIndex];
     const wrist = world[wristIndex];
     if (!shoulder || !elbow || !wrist) return false;
     if (landmarkConfidence(shoulder, elbow, wrist) < GUARD_THRESHOLDS.minConfidence) return false;
-    const local = bodyLocalPoint(wrist, shoulder, leftShoulder, rightShoulder, leftHip, rightHip, calibration.world.shoulderWidth);
     const cosine = elbowCosine(shoulder, elbow, wrist);
-    return local !== undefined && cosine !== undefined
-      && local.y >= GUARD_THRESHOLDS.minWristHeight && local.y <= GUARD_THRESHOLDS.maxWristHeight
-      && Math.abs(local.x) <= GUARD_THRESHOLDS.maxWristSide
-      && cosine <= GUARD_THRESHOLDS.maxElbowCosine;
+    if (cosine === undefined || cosine > GUARD_THRESHOLDS.maxElbowCosine) return false;
+    const distance = Math.hypot(wrist.x - nose.x, wrist.y - nose.y, wrist.z - nose.z) / width;
+    return distance <= GUARD_THRESHOLDS.maxWristToNoseSw;
   });
 }
 
@@ -242,6 +248,7 @@ export class PunchDetector {
       time,
       sample: undefined as PunchTrajectorySample | undefined,
     };
+    const nose = snapshot.worldLandmarks?.[0];
     current.sample = {
       timestampMs: time,
       lateral: localWrist.x,
@@ -251,6 +258,11 @@ export class PunchDetector {
       rawElbowCosine: rawCosine,
       confidence,
     };
+    // A real punch leaves the face: at contact the fist is at full reach, far from the nose.
+    // Noise while holding the guard never leaves face proximity — this distance is the veto.
+    if (nose && (nose.visibility ?? 0) >= GUARD_THRESHOLDS.minConfidence && calibration.world.shoulderWidth > 1e-4) {
+      current.sample.noseDistance = Math.hypot(wrist.x - nose.x, wrist.y - nose.y, wrist.z - nose.z) / calibration.world.shoulderWidth;
+    }
     const sample = current.sample;
     const previous = this.previous;
     this.previous = current;
@@ -331,6 +343,12 @@ export class PunchDetector {
           pending.sawExtension = true;
           pending.sawTravel = true;
         }
+      }
+      // The guard phantom veto: a punch that never leaves face proximity is guard noise, not a
+      // punch — at real contact the fist is at full reach, far beyond the guard radius.
+      if (pending.reached) {
+        const contactSample = pending.samples.reduce((best, pendingSample) => (pendingSample.forward > best.forward ? pendingSample : best));
+        if (contactSample.noseDistance !== undefined && contactSample.noseDistance <= GUARD_THRESHOLDS.maxWristToNoseSw) pending.reached = false;
       }
       if (ageMs >= PUNCH_THRESHOLDS.maxDurationMs && !pending.reached) this.timedOut += 1;
       if (!pending.sawExtension) this.missingExtension += 1;

@@ -100,6 +100,12 @@ const RING_DODGE_LANE_M = 0.45;
 const OPPONENT_FORWARD_SPEED = 0.6;
 const OPPONENT_CIRCLE_SPEED = 0.25;
 const BAG_POSITION: RingPosition = Object.freeze({ x: 0, z: 0 });
+/** The most recent entry satisfying `pred`, scanning backwards — no reverse-copy allocation. */
+function findLastEntry<T>(entries: T[], pred: (entry: T) => boolean): T | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) if (pred(entries[i])) return entries[i];
+  return undefined;
+}
+
 const MOVE_KEYS: Record<string, { forward: number; strafe: number }> = {
   w: { forward: 1, strafe: 0 },
   s: { forward: -1, strafe: 0 },
@@ -198,6 +204,7 @@ export class BoxingGame {
   private readonly skipGesture = new RestartGesture();
   private fightMs = 0;
   private animTimeS = 0;
+  private presentationDtS = 0;
   /** Wall time the fight last (re)started; punches peaking before it belong to a frozen fight. */
   private runningSinceWallMs = Number.POSITIVE_INFINITY;
   private lastPhase: RunPhase = 'countdown';
@@ -313,9 +320,12 @@ export class BoxingGame {
     this.camera.add(this.gloves.root);
     this.scene.add(this.camera);
     this.scene.add(this.sparks.root);
-    this.loop = new GameLoop(canvas, this.scene, this.camera, (dt) => this.update(dt));
+    this.loop = new GameLoop(canvas, this.scene, this.camera, (dt, simulationTimeMs, wallTimeMs, finalStep) => this.update(dt, simulationTimeMs, wallTimeMs, finalStep));
     if (this.loop.renderer) {
       this.ring = buildBoxingRing(this.scene, this.loop.renderer);
+      // Without this the governor never engages and the ring renders at full quality even
+      // when frames are already slow — the pose worker shares the same starved machine.
+      this.loop.onQualityChange = (tier) => this.ring?.setQuality(tier);
     } else {
       this.scene.add(new THREE.HemisphereLight(0xf0f4ff, 0x2a2018, 2));
     }
@@ -546,12 +556,12 @@ export class BoxingGame {
   }
 
   private landPunch(hand: Hand, power01: number, atMs: number, apply = applyPlayerPunch, kind: 'unknown' | 'straight' | 'hook' | 'uppercut' = 'unknown', target: 'unknown' | 'head' | 'body' = 'unknown', onsetMs = atMs): void {
-    const sample = [...this.zoneHistory].reverse().find((entry) => entry.atMs <= atMs);
+    const sample = findLastEntry(this.zoneHistory, (entry) => entry.atMs <= atMs);
     if (!(sample?.inRange ?? inPunchRange(this.playerPos, this.opponentPos))) {
       this.setFeedback('LONGE DEMAIS', 'neutral');
       return;
     }
-    const onset = [...this.zoneHistory].reverse().find((entry) => entry.atMs <= onsetMs);
+    const onset = findLastEntry(this.zoneHistory, (entry) => entry.atMs <= onsetMs);
     if (onset && sample && onset.atMs < sample.atMs && evadedByFootwork(onset.playerPos, onset.opponentPos, sample.opponentPos)) {
       this.setFeedback('ADVERSÁRIO ESQUIVOU', 'neutral');
       this.audio?.whoosh(0.6);
@@ -620,7 +630,7 @@ export class BoxingGame {
     this.lastPhase = phase;
   }
 
-  private update(dt: number): void {
+  private update(dt: number, _simulationTimeMs?: number, _wallTimeMs?: number, finalStep = true): void {
     this.gate.advance(dt);
     this.syncPhase();
     if (this.gate.phase === 'running') this.step(dt * 1000);
@@ -634,7 +644,14 @@ export class BoxingGame {
       this.bag?.update(animDt);
       this.sparks.update(animDt);
     }
-    this.poseScene(dt);
+    // Presentation runs once per rendered frame: intermediate catch-up steps pose boxers nobody
+    // will ever see, multiplying the cost exactly when the machine is already behind. The
+    // exponential smoothing composes exactly in the accumulated dt, so motion is unchanged.
+    this.presentationDtS += dt;
+    if (finalStep) {
+      this.poseScene(this.presentationDtS);
+      this.presentationDtS = 0;
+    }
   }
 
   /** Exact critically damped spring step: no overshoot from rest, stable for any `dt`. */
@@ -769,7 +786,7 @@ export class BoxingGame {
     this.moveFighters(activeMs);
     this.recordZone();
 
-    const observed = [...this.zoneHistory].reverse().find((sample) => sample.atMs <= this.fightMs - 200 && sample.atMs > this.perceptionEpochMs);
+    const observed = findLastEntry(this.zoneHistory, (sample) => sample.atMs <= this.fightMs - 200 && sample.atMs > this.perceptionEpochMs);
     const phaseBefore = this.ai.phase;
     if (!this.pendingImpact && phaseBefore.kind === 'windup' && phaseBefore.impactAtMs <= this.fightMs) {
       this.pendingImpact = { untilMs: phaseBefore.impactAtMs + IMPACT_GRACE_MS, punches: [] };
@@ -878,7 +895,7 @@ export class BoxingGame {
   private moveFighters(dtMs: number): void {
     this.movePlayer(dtMs);
 
-    const observed = [...this.zoneHistory].reverse().find((sample) => sample.atMs <= this.fightMs - 200 && sample.atMs > this.perceptionEpochMs);
+    const observed = findLastEntry(this.zoneHistory, (sample) => sample.atMs <= this.fightMs - 200 && sample.atMs > this.perceptionEpochMs);
     this.opponentMotion = stepOpponentMotion(
       this.opponentMotion,
       this.playerPos,

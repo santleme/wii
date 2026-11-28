@@ -10,6 +10,12 @@ export const median = (values: readonly number[]): number => {
   return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 };
 
+export const percentile = (values: readonly number[], ratio: number): number => {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))]!;
+};
+
 export const isFinitePoint = (point: Point3 | undefined): point is Point3 => point !== undefined
   && Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z);
 

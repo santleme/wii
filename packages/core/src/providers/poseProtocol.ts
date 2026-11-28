@@ -55,6 +55,8 @@ export interface PunchTrajectorySample {
    * frame keeps the wrist's true displacement geometry.
    */
   frozen?: { lateral: number; vertical: number; forward: number };
+  /** Wrist-to-nose distance in shoulder widths at this instant; absent when the nose is not visible. */
+  noseDistance?: number;
 }
 
 /** Compact trajectory measurement captured from punch onset through confirmation. */

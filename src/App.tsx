@@ -262,7 +262,9 @@ export default function App({ exit }: { exit?: ReactNode }) {
       poseFramesRef.current += 1;
       poseDelayRef.current = performance.now() - raw.timestampMs;
       noteArrival(raw, performance.now());
-      rememberFrame(recentFramesRef.current, raw);
+      // The 20 s rolling buffer only feeds the diagnostic E-key clip save, which is itself
+      // gated — retaining ~300 snapshots of 66 landmarks in production is pure GC pressure.
+      if (diagnosticsEnabled()) rememberFrame(recentFramesRef.current, raw);
       if (keepPhotos) photoTrailRef.current.add(raw.timestampMs, videoRef.current);
       if (recorderRef.current) {
         const current = recorderRef.current.push(raw);
@@ -462,7 +464,9 @@ export default function App({ exit }: { exit?: ReactNode }) {
 
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60 } },
+        // 30 fps is enough: pose inference saturates below 20 fps even on fast machines, so
+        // every camera frame past 30 is decoded and composited only to be discarded.
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 30 } },
       });
       if (stale()) { stream.getTracks().forEach((track) => { track.stop(); }); return; }
       streamRef.current = stream;

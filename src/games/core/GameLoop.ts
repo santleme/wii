@@ -43,7 +43,7 @@ export class GameLoop {
     canvas: HTMLCanvasElement,
     readonly scene: THREE.Scene,
     readonly camera: THREE.PerspectiveCamera,
-    private readonly update: (dt: number, simulationTimeMs: number, wallTimeMs: number) => void,
+    private readonly update: (dt: number, simulationTimeMs: number, wallTimeMs: number, finalStep?: boolean) => void,
   ) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
@@ -67,9 +67,11 @@ export class GameLoop {
     const fixed = 1 / 60;
     const schedule = collectFixedStepTimestamps(this.simulationTimeMs, this.accumulator, fixed, 5);
     this.accumulator = schedule.remainderSeconds;
-    for (const simulationTimeMs of schedule.timestampsMs) {
+    for (const [index, simulationTimeMs] of schedule.timestampsMs.entries()) {
       this.simulationTimeMs = simulationTimeMs;
-      this.update(fixed, simulationTimeMs, time);
+      // Only the last step is ever rendered: intermediate steps in a catch-up frame exist for
+      // simulation alone, and games can skip per-step presentation work when this is false.
+      this.update(fixed, simulationTimeMs, time, index === schedule.timestampsMs.length - 1);
     }
     this.renderer.render(this.scene, this.camera);
   }

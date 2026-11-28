@@ -235,7 +235,7 @@ describe('buildBoxingRing', () => {
     expect(scene.fog).not.toBe(previousFog);
     expect(renderer.toneMapping).toBe(THREE.ACESFilmicToneMapping);
     expect(renderer.shadowMap.enabled).toBe(true);
-    expect(renderer.shadowMap.type).toBe(THREE.PCFSoftShadowMap);
+    expect(renderer.shadowMap.type).toBe(THREE.PCFShadowMap);
 
     ring.dispose();
     ring.dispose();

@@ -251,19 +251,28 @@ export class ActionPipeline {
       }
     }
 
+    // Read after the punch detectors, so the frame of a punch onset is already frozen.
+    const punching = this.punchInFlight.active(snapshot.timestampMs);
     // Boxing's footwork signals need the calibrated neutral, and read the torso the vertical channel does.
     if (calibration && (calibration.readiness?.neutral01 ?? 1) >= 0.65 && footworkTracked) {
-      const dodge = this.dodge.update(current, calibration);
-      if (dodge !== undefined) controls = { ...controls, dodgeZone: dodge };
-      // Read after the punch detectors, so the frame of a punch onset is already frozen.
-      const punching = this.punchInFlight.active(snapshot.timestampMs);
       const depth = this.ringDepth.update(current, calibration, punching);
       if (depth !== undefined) controls = { ...controls, ringDepthMove: depth, ringDepth01: this.ringDepth.approach01 };
       const dash = this.lateralDash.update(current, punching);
       if (dash !== undefined) controls = { ...controls, lateralDash: dash };
-      const duck = this.duckTracker.update(current, punching);
-      if (duck !== undefined) controls = { ...controls, duck };
     }
+
+    // Outside the footwork gate like the duck: the gate demands hip confidence, and vigorous
+    // lateral movement — exactly what a slip is — degrades hip landmarks and closes it. The
+    // dodge reads only the shoulders and self-reports undefined when they are unreadable.
+    if (calibration) {
+      const dodge = this.dodge.update(current, calibration, punching);
+      if (dodge !== undefined) controls = { ...controls, dodgeZone: dodge };
+    }
+    // Outside the footwork gate: a deep duck takes the legs out of the frame, footwork tracking
+    // drops, and a duck gate that depends on it closes exactly when the duck happens. The tracker
+    // normalizes by its own torso length and needs no calibration either.
+    const duck = this.duckTracker.update(current);
+    if (duck !== undefined) controls = { ...controls, duck };
 
     return { snapshot: current, events, controls, rawEffort, effortSampleAtMs: this.intensity.sampleAtMs, armMotions: this.arms.flatMap((arm) => arm.update(current) ?? []), swingTracking: { scaleReady: swingScaleReady, wrists: results.map(({ hand, tracked, pending }) => ({ hand, tracked, pending, arbitrating: this.heldSwing?.hand === hand })) } };
   }

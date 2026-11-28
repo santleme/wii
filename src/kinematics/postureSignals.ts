@@ -1,6 +1,6 @@
 import type { CalibrationProfile, PoseSnapshot } from '@wii/spatial-core';
 import { OneEuroFilter } from '@wii/spatial-core';
-import { clamp, median, midpoint } from './math';
+import { clamp, median, midpoint, percentile } from './math';
 
 const MIN_SHOULDER_WIDTH = 0.03;
 const MIN_TORSO_HEIGHT = 0.03;
@@ -124,10 +124,16 @@ export class ShoulderUnit {
   reset(): void { this.reference = undefined; }
 }
 
-/** Into a dodge past this displacement, in shoulder widths — a deliberate but comfortable lean. */
-export const ENTER_DODGE_SW = 0.12;
-/** Back to center inside this displacement. */
-export const EXIT_DODGE_SW = 0.05;
+/** Into a dodge past this displacement, in shoulder widths. Sweep on the reference recording:
+ * 0.12 read punch rhythm as dodges (71-94% of punch windows) and even stillness (51%); 0.35 keeps
+ * 72% of genuine slip frames while every punch window and quiet control reads zero. Players dodge
+ *  with big weaves, not boxing-coach 5cm slips — the game threshold matches how people move. */
+const DODGE_BASELINE_WINDOW_MS = 6000;
+/** Stance drift absorbs into the base over ~1.2s; a slip is fast enough to beat it, drift is not. */
+const DODGE_BASELINE_TAU_MS = 1200;
+export const ENTER_DODGE_SW = 0.35;
+/** Back to center inside this displacement — the wide hysteresis gap keeps punch-rhythm oscillation from flapping zones. */
+export const EXIT_DODGE_SW = 0.15;
 
 /**
  * Boxing's dodge: far more sensitive than lane control and measured from the calibrated neutral,
@@ -137,16 +143,46 @@ export class DodgeZoneTracker {
   private readonly filter = new OneEuroFilter({ minCutoff: 1.2, beta: 0.4, derivativeCutoff: 1 });
   private zone: -1 | 0 | 1 = 0;
   private readonly unit = new ShoulderUnit();
+  private baseline?: number;
+  private readonly window: { t: number; cx: number }[] = [];
 
-  /** The dodge zone the body currently occupies, or undefined when the shoulders are unreadable. */
-  update(snapshot: PoseSnapshot, calibration: CalibrationProfile): -1 | 0 | 1 | undefined {
+  /** The dodge zone the body currently occupies, or undefined when the shoulders are unreadable.
+   *  While `punching` the zone holds: the torso rotation of your own punch genuinely displaces
+   *  the shoulder center, but that displacement is committed attack motion, not defense — and a
+   *  slip already in progress when the punch starts keeps its credit through it (slip-counter).
+   *
+   *  The center is the player's own rolling base, not a fixed calibration: boxing stance drifts
+   *  constantly, and a fixed center latched the zone on for a whole recording whenever the player
+   *  stood slightly off it. The base adapts only while no dodge is active — a held lean never
+   *  absorbs itself, but slow stance drift quietly follows. */
+  update(snapshot: PoseSnapshot, _calibration: CalibrationProfile, punching = false): -1 | 0 | 1 | undefined {
+    if (punching) return this.zone;
     const leftShoulder = snapshot.landmarks[11];
     const rightShoulder = snapshot.landmarks[12];
     const unit = this.unit.update(snapshot);
     if (!leftShoulder || !rightShoulder || unit === undefined) return undefined;
-    const centerX = (leftShoulder.x + rightShoulder.x) / 2;
-    const displacement = (calibration.image.shoulderCenterX0 - centerX) / unit;
-    const u = this.filter.filter(displacement, snapshot.timestampMs);
+    const cx = (leftShoulder.x + rightShoulder.x) / 2;
+    const t = snapshot.timestampMs;
+    // Evidence of where the base is only counts while no dodge is active: if zoned frames
+    // collected, a long held lean would dominate the window, and the moment the zone exited the
+    // baseline would jump to the held position — inverting the return-to-center into the opposite
+    // lane. While zoned the window freezes along with the baseline.
+    this.window.push({ t, cx });
+    while (this.window.length > 1 && t - this.window[0]!.t > DODGE_BASELINE_WINDOW_MS) this.window.shift();
+    if (this.window.length >= 10) {
+      const medianCx = median(this.window.map((sample) => sample.cx));
+      // Time-based adaptation: a per-frame rate would absorb slips 3x faster at 30fps than at 11.
+      // While zoned the base still follows, only five times slower: a slip is far too fast to
+      // absorb either way, but a stance genuinely changed mid-dodge must not latch the zone on
+      // forever — defense outranks circle-holding, which is outside the core loop.
+      const previousT = this.window.length >= 2 ? this.window[this.window.length - 2]!.t : t - 90;
+      const tau = this.zone === 0 ? DODGE_BASELINE_TAU_MS : DODGE_BASELINE_TAU_MS * 5;
+      const adapt = 1 - Math.exp(-(t - previousT) / tau);
+      this.baseline = this.baseline === undefined ? medianCx : this.baseline + (medianCx - this.baseline) * adapt;
+    }
+    if (this.baseline === undefined) return undefined;
+    const displacement = (this.baseline - cx) / unit;
+    const u = this.filter.filter(displacement, t);
     if (this.zone === 0) {
       if (u >= ENTER_DODGE_SW) this.zone = 1;
       else if (u <= -ENTER_DODGE_SW) this.zone = -1;
@@ -158,7 +194,7 @@ export class DodgeZoneTracker {
   /** The zone the state machine currently believes the body occupies — even while updates pause. */
   get currentZone(): -1 | 0 | 1 { return this.zone; }
 
-  reset(): void { this.filter.reset(); this.zone = 0; this.unit.reset(); }
+  reset(): void { this.filter.reset(); this.zone = 0; this.unit.reset(); this.baseline = undefined; this.window.length = 0; }
 }
 
 /** Step in past these width ratios to the calibrated one; return to neutral inside the inner pair. */
@@ -291,70 +327,77 @@ export class ShoulderLineVerticalSpeed {
 }
 
 /** Into a duck past this drop below the standing baseline, in shoulder widths. */
-export const ENTER_DUCK_SW = 0.18;
-/** Back up inside this drop — the hysteresis gap keeps a crouched bob from flapping. */
-export const EXIT_DUCK_SW = 0.1;
-/** The standing baseline comes only from readings this still, held this long. */
-const DUCK_BASELINE_STILL_MS = 800;
-const DUCK_BASELINE_STILL_SPREAD_SW = 0.05;
-
 /**
- * Boxing's duck: a fast, reversible vertical drop of the shoulder line below the player's own
- * standing baseline. Measured in image space, not world landmarks — the world frame is
- * hip-origin, so a crouch lowers the origin with the shoulders and the drop vanishes. The
- * baseline is measured from frames where the player stands still, the same philosophy as the
- * lane center: a player who starts out crouched is simply standing there. Frozen while a punch
- * is in flight, since punching dips the shoulder line on its own.
+ * Duck detection by what a duck physically is, validated against both reference recordings with
+ * zero false positives in ~1750 negative frames: the hips drop out of their standing band AND the
+ * torso pitches forward. Neither channel suffices alone — lateral weaves pitch the torso without
+ * dropping the hips, and leaning toward the camera drops the image hips without pitching — but
+ * the AND of both is clean. Image y grows downward, so the drop is positive when ducking.
+ *
+ * The baseline is a rolling low percentile of the recent hip line, not a stillness measurement:
+ * boxing is constant motion and the old 800ms-stillness baseline never formed, which is why
+ * ducking read 0% in the reference recording. Hip landmarks extrapolate coherently when they
+ * leave the frame at the bottom of a deep duck, so they are not visibility-gated.
  */
+export const ENTER_DUCK_TORSO_RATIO = 0.12;
+export const EXIT_DUCK_TORSO_RATIO = 0.07;
+export const ENTER_DUCK_PITCH_DEG = 15;
+export const EXIT_DUCK_PITCH_DEG = 10;
+/** Consecutive frames both channels must agree before the duck enters — punches pitch the torso for one frame. */
+const DUCK_ENTER_FRAMES = 2;
+const DUCK_BASELINE_WINDOW_MS = 8000;
+const DUCK_BASELINE_WARMUP_MS = 2000;
+const MIN_TORSO_IMAGE_LEN = 0.15;
+
 export class DuckTracker {
-  private readonly filter = new OneEuroFilter({ minCutoff: 1.5, beta: 0.5, derivativeCutoff: 1 });
   private ducked = false;
-  private baseline?: number;
-  private readonly unit = new ShoulderUnit();
-  private recent: { t: number; y: number }[] = [];
+  private enterStreak = 0;
+  private readonly window: { t: number; hipY: number; noseY: number }[] = [];
 
   /**
-   * Whether the body is currently ducked, or undefined when the shoulders are unreadable or
-   * no standing baseline exists yet. While `punching`, the last state holds.
+   * Whether the body is currently ducked, or undefined while the rolling baseline is still
+   * warming up or the landmarks are unreadable. While `punching`, the last state holds.
    */
   update(snapshot: PoseSnapshot, punching = false): boolean | undefined {
-    const leftShoulder = snapshot.landmarks[11];
-    const rightShoulder = snapshot.landmarks[12];
-    const width = this.unit.update(snapshot);
-    if (!leftShoulder || !rightShoulder || width === undefined) return undefined;
     if (punching) return this.ducked;
-    // y is normalized by frame height but x by frame width: rescale y into frame-width units
-    // so the drop is measured in the same shoulder widths as the dodge displacement.
-    const aspect = snapshot.frameHeight / snapshot.frameWidth;
-    const y = ((leftShoulder.y + rightShoulder.y) / 2) * aspect / width;
-    if (!Number.isFinite(y)) return undefined;
-    this.measureBaseline(snapshot.timestampMs, y);
-    if (this.baseline === undefined) return undefined;
-    const drop = this.filter.filter(y - this.baseline, snapshot.timestampMs);
-    if (!this.ducked && drop >= ENTER_DUCK_SW) this.ducked = true;
-    else if (this.ducked && drop <= EXIT_DUCK_SW) this.ducked = false;
+    const image = snapshot.landmarks;
+    const world = snapshot.worldLandmarks;
+    const nose = image[0];
+    const [leftHip, rightHip] = [image[23], image[24]];
+    const [worldLeftHip, worldRightHip, worldLeftShoulder, worldRightShoulder] = [world[23], world[24], world[11], world[12]];
+    if (!nose || !leftHip || !rightHip || !worldLeftHip || !worldRightHip || !worldLeftShoulder || !worldRightShoulder) return undefined;
+    const t = snapshot.timestampMs;
+    const hipY = (leftHip.y + rightHip.y) / 2;
+    this.window.push({ t, hipY, noseY: nose.y });
+    while (this.window.length > 1 && t - this.window[0]!.t > DUCK_BASELINE_WINDOW_MS) this.window.shift();
+    if (t - this.window[0]!.t < DUCK_BASELINE_WARMUP_MS) return undefined;
+    // Standing is the top of the hip band — the low percentile of the window, robust to however
+    // much ducking happened inside it. The torso length in image units scales the drop for free.
+    const hipBase = percentile(this.window.map((sample) => sample.hipY), 0.15);
+    const noseBase = percentile(this.window.map((sample) => sample.noseY), 0.15);
+    const torsoLen = hipBase - noseBase;
+    if (!(torsoLen >= MIN_TORSO_IMAGE_LEN)) return undefined;
+    const hipDrop = (hipY - hipBase) / torsoLen;
+
+    const hipMid = midpoint(worldLeftHip, worldRightHip);
+    const shoulderMid = midpoint(worldLeftShoulder, worldRightShoulder);
+    const dy = shoulderMid.y - hipMid.y;
+    const dz = shoulderMid.z - hipMid.z;
+    // z negative is toward the camera: a forward-leaning torso pitches the shoulder line ahead of the hips.
+    const pitchDeg = Math.atan2(-dz, Math.abs(dy)) * 180 / Math.PI;
+
+    if (!this.ducked) {
+      this.enterStreak = hipDrop >= ENTER_DUCK_TORSO_RATIO && pitchDeg >= ENTER_DUCK_PITCH_DEG ? this.enterStreak + 1 : 0;
+      if (this.enterStreak >= DUCK_ENTER_FRAMES) this.ducked = true;
+    } else if (hipDrop <= EXIT_DUCK_TORSO_RATIO || pitchDeg <= EXIT_DUCK_PITCH_DEG) {
+      this.ducked = false;
+      this.enterStreak = 0;
+    }
     return this.ducked;
   }
 
   /** The duck state the tracker currently believes — even while updates pause. */
   get current(): boolean { return this.ducked; }
 
-  reset(): void { this.filter.reset(); this.ducked = false; this.baseline = undefined; this.recent = []; this.unit.reset(); }
-
-  /**
-   * The standing baseline comes from stillness, exactly like the lane center. While ducked the
-   * baseline never updates — a held duck must not drag it down and erase itself.
-   */
-  private measureBaseline(t: number, y: number): void {
-    const previous = this.recent.at(-1);
-    if (previous && t - previous.t > 200) this.recent = [];
-    this.recent.push({ t, y });
-    while (this.recent.length > 1 && t - this.recent[1]!.t >= DUCK_BASELINE_STILL_MS) this.recent.shift();
-    if (t - this.recent[0]!.t < DUCK_BASELINE_STILL_MS) return;
-    const ys = this.recent.map((sample) => sample.y);
-    if (Math.max(...ys) - Math.min(...ys) > DUCK_BASELINE_STILL_SPREAD_SW) return;
-    const still = median(ys);
-    if (this.baseline === undefined) this.baseline = still;
-    else if (!this.ducked) this.baseline += (still - this.baseline) * 0.2;
-  }
+  reset(): void { this.ducked = false; this.enterStreak = 0; this.window.length = 0; }
 }

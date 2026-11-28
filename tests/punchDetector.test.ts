@@ -7,7 +7,11 @@ import { calibration, pose } from './fixtures/syntheticPose';
 /** Elbow and wrist offsets from the shoulder, in world metres; -z is toward the camera. */
 interface Arm { elbow: Point3; wrist: Point3 }
 
+// The chambered position punches start from. Not a literal face-covering guard — punch
+// dynamics tests only need a bent-arm start pose.
 const GUARD: Arm = { elbow: { x: 0, y: 0.28, z: -0.05 }, wrist: { x: 0, y: 0, z: -0.18 } };
+// A real blocking guard: fist up at cheek level near the nose (which sits at y0), elbow dropped by the ribs.
+const CHIN_GUARD: Arm = { elbow: { x: 0.05, y: -0.1, z: -0.02 }, wrist: { x: -0.14, y: 0.32, z: -0.12 } };
 const STRAIGHT: Arm = { elbow: { x: 0, y: 0.02, z: -0.3 }, wrist: { x: 0, y: 0.02, z: -0.58 } };
 const HANGING: Arm = { elbow: { x: 0, y: 0.3, z: 0 }, wrist: { x: 0, y: 0.58, z: 0 } };
 const SIDEWAYS: Arm = { elbow: { x: 0.3, y: 0, z: 0 }, wrist: { x: 0.58, y: 0, z: 0 } };
@@ -323,20 +327,24 @@ describe('isGuardingPose', () => {
   // Fists wide of the head with folded elbows: hands up, nothing covered.
   const WIDE: Arm = { elbow: { x: 0.28, y: 0.1, z: 0 }, wrist: { x: 0.42, y: -0.14, z: 0 } };
 
-  it('reads both folded fists at shoulder height as a guard', () => {
-    expect(guarding(GUARD, GUARD)).toBe(true);
+  it('reads both folded fists up at the cheeks as a guard', () => {
+    expect(guarding(CHIN_GUARD, CHIN_GUARD)).toBe(true);
+  });
+
+  it('does not read shoulder-height folded fists as a guard — they cover nothing', () => {
+    expect(guarding(GUARD, GUARD)).toBe(false);
   });
 
   it.each([['extended', STRAIGHT], ['hanging', HANGING], ['stretched sideways', SIDEWAYS], ['wide', WIDE]] as const)(
     'is not a guard with one arm %s',
     (_name, arm) => {
-      expect(guarding(arm, GUARD)).toBe(false);
-      expect(guarding(GUARD, arm)).toBe(false);
+      expect(guarding(arm, CHIN_GUARD)).toBe(false);
+      expect(guarding(CHIN_GUARD, arm)).toBe(false);
     },
   );
 
   it('has no guard when a wrist is not visible', () => {
-    const snapshot = armPose(0);
+    const snapshot = armPose(0, { left: CHIN_GUARD, right: CHIN_GUARD });
     const worldLandmarks = snapshot.worldLandmarks.map((point, index) => (index === 15 ? { ...point, visibility: 0 } : point));
     expect(isGuardingPose({ ...snapshot, worldLandmarks }, calibration())).toBe(false);
   });

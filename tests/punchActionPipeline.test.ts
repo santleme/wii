@@ -4,22 +4,30 @@ import { ActionPipeline } from '../src/kinematics/actionPipeline';
 import { calibration, pose } from './fixtures/syntheticPose';
 
 /** Right arm blended from guard (0) to a straight punch toward the camera (1). */
-function rightArm(time: number, extension: number, hiddenLandmarks: readonly number[] = []): PoseSnapshot {
+function rightArm(time: number, extension: number, hiddenLandmarks: readonly number[] = [], chinGuard = false): PoseSnapshot {
   const snapshot = pose(time, { hiddenLandmarks });
   const world = [...snapshot.worldLandmarks];
   const shoulder = world[12]!;
-  const place = (index: number, y0: number, z0: number, y1: number, z1: number) => {
+  const place = (index: number, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number) => {
     const visible = hiddenLandmarks.includes(index) ? 0 : 0.95;
     world[index] = {
-      x: shoulder.x,
+      x: shoulder.x + x0 + (x1 - x0) * extension,
       y: shoulder.y + y0 + (y1 - y0) * extension,
       z: z0 + (z1 - z0) * extension,
       visibility: visible,
       presence: visible,
     };
   };
-  place(14, 0.28, -0.05, 0.02, -0.3);
-  place(16, 0, -0.18, 0.02, -0.58);
+  // Extension 0 is a real blocking guard: fist up at cheek level near the chin, slightly
+  // inward of the shoulder line, elbow dropped by the ribs. Extension 1 is a straight
+  // punch traveling horizontally at face height, elbow just below the fist line.
+  if (chinGuard) {
+    place(14, 0.02, -0.1, -0.02, 0, 0.05, -0.3);
+    place(16, 0.14, 0.32, -0.12, 0, 0.02, -0.58);
+  } else {
+    place(14, 0, 0.28, -0.05, 0, 0.02, -0.3);
+    place(16, 0, 0, -0.18, 0, 0.02, -0.58);
+  }
   return { ...snapshot, worldLandmarks: world };
 }
 
@@ -76,10 +84,11 @@ describe('punch wiring in ActionPipeline', () => {
       const profile = { ...calibration(), readiness: { scale01, neutral01: 1 } };
       // Both arms mirror the right one, so the left fist is in place too.
       const both = (time: number) => {
-        const snapshot = rightArm(time, extension);
+        const snapshot = rightArm(time, extension, [], true);
         const world = [...snapshot.worldLandmarks];
         for (const [from, to] of [[14, 13], [16, 15]] as const) {
-          world[to] = { ...world[from]!, x: world[11]!.x };
+          // Mirror across the midline: keep the inward/outward offset from the shoulder line.
+          world[to] = { ...world[from]!, x: world[11]!.x - (world[from]!.x - world[12]!.x) };
         }
         return { ...snapshot, worldLandmarks: world };
       };
