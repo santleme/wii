@@ -14,7 +14,8 @@ try {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter>
+    {/* Navigation must not be a transition: the hand pointer updates state every camera frame and starves it. */}
+    <BrowserRouter useTransitions={false}>
       <LangProvider>
         <App />
       </LangProvider>

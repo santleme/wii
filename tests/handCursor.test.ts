@@ -571,3 +571,187 @@ describe('hand cursor rotational flick arbitration', () => {
     expect(lost).toMatchObject({ pinchRelease: false, backProgress: 0, rotationAngularVelocity: 0 });
   });
 });
+
+describe('index finger tap click', () => {
+  const tapper = () => synched(new HandCursorDetector({ indexTapClick: true }));
+  /** One frame every 40 ms from t = 1100, each with the given index bend. */
+  const frames = (detector: HandCursorDetector, bends: number[], extra: Parameters<typeof hand>[1] = {}, from = 1100) =>
+    bends.map((indexCurl, i) => detector.update(hand(from + i * 40, { ...extra, indexCurl })));
+  const clicks = (states: { pinchRelease: boolean }[]) => states.filter((state) => state.pinchRelease).length;
+
+  it('clicks once per flexion and needs the finger straight again', () => {
+    const detector = tapper();
+    const first = frames(detector, [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    expect(clicks(first)).toBe(1);
+    expect(first[4]).toMatchObject({ pinching: true });
+    const second = frames(detector, [0, 0, 1, 1, 1, 1], {}, 1700);
+    expect(second[0]).toMatchObject({ pinching: false });
+    expect(clicks(second)).toBe(1);
+  });
+
+  it('does not click when every finger closes into a fist', () => {
+    const detector = tapper();
+    detector.update(hand(1100));
+    const states = [1140, 1180, 1220, 1260, 1300].map((time) => detector.update(hand(time, { curl: 1 })));
+    expect(clicks(states)).toBe(0);
+  });
+
+  it('keeps the pointer still while the index bends', () => {
+    const detector = tapper();
+    const [aimed] = frames(detector, [0, 0, 0]).slice(-1);
+    const bent = [0.7, 1, 1, 1].map((indexCurl, i) =>
+      detector.update(hand(1220 + i * 40, { indexCurl, dx: 0.004 * (i + 1), dy: 0.004 * (i + 1) })),
+    );
+    expect(clicks(bent)).toBe(1);
+    for (const state of bent) expect(state).toMatchObject({ x: aimed!.x, y: aimed!.y });
+  });
+
+  it('ignores a flexion while the hand is sweeping across the screen', () => {
+    const detector = tapper();
+    detector.update(hand(1100));
+    const states = [0, 1, 1, 1, 1].map((indexCurl, i) =>
+      detector.update(hand(1140 + i * 40, { indexCurl, dx: 0.02 * (i + 1) })),
+    );
+    expect(clicks(states)).toBe(0);
+  });
+
+  it('lets go of the pointer when a half bend never becomes a click', () => {
+    const detector = tapper();
+    frames(detector, [0, 0]);
+    const half = Array.from({ length: 16 }, (_, i) =>
+      detector.update(hand(1180 + i * 40, { indexCurl: 0.5, dx: 0.001 * i })),
+    );
+    expect(clicks(half)).toBe(0);
+    expect(half.at(-1)!.x).not.toBeCloseTo(half[0]!.x, 3);
+  });
+
+  it('measures the bend in 3D when world landmarks are present', () => {
+    const detector = tapper();
+    // The image looks bent (a finger aimed at the camera) while the 3D finger is straight.
+    const states = [0, 1, 1, 1].map((indexCurl, i) => {
+      const time = 1100 + i * 40;
+      return detector.update({ ...hand(time, { indexCurl }), worldLandmarks: hand(time).landmarks });
+    });
+    expect(clicks(states)).toBe(0);
+  });
+
+  it('changes nothing for the arena, where the option is off', () => {
+    const arena = synched();
+    const explicit = synched(new HandCursorDetector({ indexTapClick: false }));
+    const bends = [0, 0.7, 1, 1, 1, 0, 1, 1];
+    const states = frames(arena, bends, { dx: 0.001 });
+    expect(states).toEqual(frames(explicit, bends, { dx: 0.001 }));
+    expect(states.some((state) => state.pinching || state.pinchRelease)).toBe(false);
+  });
+});
+
+describe('index tap from the pointing pose', () => {
+  const tapper = () => synched(new HandCursorDetector({ indexTapClick: true }));
+  /** One frame every 40 ms from t = 1100: [bend of middle/ring/pinky, bend of the index]. */
+  const play = (detector: HandCursorDetector, bends: [number, number][], from = 1100) =>
+    bends.map(([curl, indexCurl], i) => detector.update(hand(from + i * 40, { curl, indexCurl })));
+  const clicks = (states: { pinchRelease: boolean }[]) => states.filter((state) => state.pinchRelease).length;
+  const aim: [number, number][] = Array.from({ length: 8 }, () => [1, 0]);
+  const held = (indexCurl: number, count: number): [number, number][] => Array.from({ length: count }, () => [1, indexCurl]);
+
+  it.each([0.52, 0.7, 1])('clicks once with the index bent to %s, without going back', (depth) => {
+    const detector = tapper();
+    const aimed = play(detector, aim);
+    expect(clicks(aimed)).toBe(0);
+    const bent = play(detector, held(depth, 20), 1420);
+    expect(clicks(bent)).toBe(1);
+    expect(bent.every((state) => state.backProgress === 0)).toBe(true);
+    expect(bent[1]).toMatchObject({ x: aimed.at(-1)!.x, y: aimed.at(-1)!.y });
+    expect(clicks(play(detector, [...aim, ...held(depth, 4)], 2220))).toBe(1);
+  });
+
+  it('does not click when an open hand closes gradually, and still goes back', () => {
+    const detector = tapper();
+    const closing: [number, number][] = [0, 0, 0.25, 0.5, 0.75, ...Array.from({ length: 20 }, () => 1)].map((c) => [c, c]);
+    const states = play(detector, closing);
+    expect(clicks(states)).toBe(0);
+    expect(states.at(-1)!.backProgress).toBe(1);
+  });
+
+  it('still goes back when the other fingers close just before the index', () => {
+    const detector = tapper();
+    const states = play(detector, [[0, 0], [0, 0], [0, 0], [1, 0], [1, 0], ...Array.from({ length: 20 }, () => [1, 1] as [number, number])]);
+    expect(clicks(states)).toBe(0);
+    expect(states.at(-1)!.backProgress).toBe(1);
+  });
+});
+
+describe('index tap in 3D', () => {
+  const tapper = () => synched(new HandCursorDetector({ indexTapClick: true }));
+  const clicks = (states: { pinchRelease: boolean }[]) => states.filter((state) => state.pinchRelease).length;
+
+  /** A straight index lowered about its base toward the camera, by `degrees`, in image and world alike. */
+  function pitched(time: number, degrees: number, curl = 0): MenuHandSnapshot {
+    const snapshot = hand(time, { curl, indexCurl: 0 });
+    const base = snapshot.landmarks[5]!;
+    const angle = (degrees * Math.PI) / 180;
+    const landmarks = snapshot.landmarks.map((p, i) =>
+      i < 6 || i > 8
+        ? p
+        : { x: p.x, y: base.y + (p.y - base.y) * Math.cos(angle), z: (p.y - base.y) * Math.sin(angle) },
+    );
+    return { ...snapshot, landmarks, worldLandmarks: landmarks.map((p) => ({ ...p })) };
+  }
+
+  const play = (detector: HandCursorDetector, angles: number[], curl = 0, from = 1100) =>
+    angles.map((degrees, i) => detector.update(pitched(from + i * 40, degrees, curl)));
+
+  it.each([0, 1])('clicks when a straight index drops at its base (other fingers curl %s)', (curl) => {
+    const detector = tapper();
+    const aimed = play(detector, [0, 0, 0, 0, 0, 0, 0, 0], curl);
+    const down = play(detector, [25, 50, 50, 50, 50, 50], curl, 1420);
+    expect(clicks(down)).toBe(1);
+    expect(down[2]).toMatchObject({ pinching: true, x: aimed.at(-1)!.x, y: aimed.at(-1)!.y });
+    expect(down.every((state) => state.backProgress === 0)).toBe(true);
+    const again = play(detector, [0, 0, 0, 0, 0, 0, 0, 0, 50, 50, 50], curl, 1800);
+    expect(clicks(again)).toBe(1);
+  });
+
+  it('does not click twice while the finger stays down or only comes halfway back', () => {
+    const detector = tapper();
+    play(detector, [0, 0]);
+    expect(clicks(play(detector, [50, 50, 50, 35, 35, 50, 50, 50, 50, 50, 50, 50], 0, 1180))).toBe(1);
+  });
+
+  it('accepts a new resting direction after a tap instead of staying disarmed', () => {
+    const detector = tapper();
+    play(detector, [0, 0]);
+    play(detector, [50, 50, 50], 0, 1180);
+    // The finger comes back straight but 30 degrees lower than before, and stays there.
+    play(detector, Array.from({ length: 20 }, () => 30), 0, 1300);
+    expect(clicks(play(detector, [75, 75, 75], 0, 2100))).toBe(1);
+  });
+
+  it('does not read a finger aimed at the camera as a fist', () => {
+    // The image looks closed; in 3D the index is straight.
+    const foreshortened = (time: number): MenuHandSnapshot => ({
+      ...hand(time, { curl: 1 }),
+      worldLandmarks: hand(time, { curl: 1, indexCurl: 0 }).landmarks,
+    });
+    const run = (detector: HandCursorDetector) => {
+      detector.update(hand(1100));
+      return Array.from({ length: 20 }, (_, i) => detector.update(foreshortened(1140 + i * 40)));
+    };
+    expect(run(tapper()).every((state) => state.backProgress === 0)).toBe(true);
+    // The arena keeps measuring the fist on the image.
+    expect(run(synched()).at(-1)!.backProgress).toBe(1);
+  });
+
+  it('gives one click when a pinch follows from lowering the index', () => {
+    const detector = tapper();
+    play(detector, [0, 0]);
+    const states = Array.from({ length: 16 }, (_, i) => {
+      const snapshot = pitched(1180 + i * 40, 50);
+      // After the tap the thumb reaches the lowered fingertip and stays there.
+      const tip = snapshot.landmarks[8]!;
+      const landmarks = snapshot.landmarks.map((p, k) => (k === 4 && i >= 8 ? { ...tip, x: tip.x + 0.01 } : p));
+      return detector.update({ ...snapshot, landmarks });
+    });
+    expect(clicks(states)).toBe(1);
+  });
+});

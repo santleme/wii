@@ -6,6 +6,8 @@ export interface SyntheticHandOptions {
   tipY?: number;
   pinchRatio?: number;
   curl?: number;
+  /** Bends the index finger alone; defaults to `curl`. */
+  indexCurl?: number;
   scale?: number;
   dx?: number;
   dy?: number;
@@ -37,6 +39,7 @@ const CHAINS: readonly Chain[] = [
 export function hand(timestampMs: number, options: SyntheticHandOptions = {}): MenuHandSnapshot {
   const scale = options.scale ?? 0.1;
   const curl = options.curl ?? 0;
+  const indexCurl = options.indexCurl ?? curl;
   const anchorX = (options.tipX ?? 0.5) + (options.dx ?? 0);
   const anchorY = (options.tipY ?? 0.5) + (options.dy ?? 0);
   const landmarks: Point3[] = Array.from({ length: 21 }, () => point(0, 0));
@@ -50,6 +53,7 @@ export function hand(timestampMs: number, options: SyntheticHandOptions = {}): M
   landmarks[9] = point(wrist.x, wrist.y - scale);
 
   const placeFinger = (chain: Chain, mcpOpen: Point3) => {
+    const bend = chain.tip === 8 ? indexCurl : curl;
     const curlDirection = mcpOpen.x <= wrist.x ? -1 : 1;
     const openPip = point(mcpOpen.x, mcpOpen.y - 0.45 * scale);
     const openDip = point(mcpOpen.x, mcpOpen.y - 0.75 * scale);
@@ -58,9 +62,9 @@ export function hand(timestampMs: number, options: SyntheticHandOptions = {}): M
     const closedDip = point(mcpOpen.x + curlDirection * 0.22 * scale, mcpOpen.y - 0.25 * scale);
     const closedTip = point(mcpOpen.x + curlDirection * 0.3 * scale, mcpOpen.y + 0.05 * scale);
     landmarks[chain.mcp] = mcpOpen;
-    landmarks[chain.pip] = morph(openPip, closedPip, curl);
-    landmarks[chain.dip] = morph(openDip, closedDip, curl);
-    landmarks[chain.tip] = chain.tip === 8 && curl === 0 ? indexTipOpen : morph(openTip, closedTip, curl);
+    landmarks[chain.pip] = morph(openPip, closedPip, bend);
+    landmarks[chain.dip] = morph(openDip, closedDip, bend);
+    landmarks[chain.tip] = chain.tip === 8 && bend === 0 ? indexTipOpen : morph(openTip, closedTip, bend);
   };
 
   placeFinger(CHAINS[0]!, indexMcpOpen);

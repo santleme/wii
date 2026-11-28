@@ -1,13 +1,22 @@
-import { useEffect, useRef, type CSSProperties, type MouseEvent } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import ProductAsciiArt from '../components/ProductAsciiArt';
+import { useSiteHand } from '../app/SiteHandContext';
+import LocalErrorBoundary from '../components/LocalErrorBoundary';
+import type { ProductHandStageHandle } from '../components/ProductHandStage';
 import { useLang } from '../i18n';
 import { runWarp } from '../lib/warp';
+
+const loadProductHandStage = () => import('../components/ProductHandStage');
 
 export default function ProductPage() {
   const { tr } = useLang();
   const navigate = useNavigate();
+  const { stopCamera } = useSiteHand();
+  const handStage = useRef<ProductHandStageHandle>(null);
   const stopWarp = useRef<() => void>(() => undefined);
+  const [stageLoadAttempt, setStageLoadAttempt] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: stageLoadAttempt intentionally resets the failed lazy boundary.
+  const ProductHandStage = useMemo(() => lazy(loadProductHandStage), [stageLoadAttempt]);
   useEffect(() => () => {
     stopWarp.current();
     document.body.classList.remove('is-falling');
@@ -17,6 +26,9 @@ export default function ProductPage() {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
     if (document.body.classList.contains('is-falling')) return;
+    // The arena claims the camera and its own MediaPipe worker.
+    stopCamera();
+    handStage.current?.shutdown();
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
       navigate('/app');
       return;
@@ -41,7 +53,22 @@ export default function ProductPage() {
           <span className="status-arrow" aria-hidden="true">↗</span>
         </Link>
         <figure className="construction-art">
-          <ProductAsciiArt />
+          <LocalErrorBoundary
+            key={stageLoadAttempt}
+            label="Failed to load the product hand stage"
+            fallback={
+              <div className="hand-stage-fallback" role="alert">
+                <p>{tr('Não foi possível carregar a mão em 3D.', 'The 3D hand could not be loaded.')}</p>
+                <button type="button" className="article-retry" onClick={() => setStageLoadAttempt((attempt) => attempt + 1)}>
+                  {tr('Tentar novamente', 'Try again')}
+                </button>
+              </div>
+            }
+          >
+            <Suspense fallback={<div className="construction-ascii-canvas" aria-hidden="true" />}>
+              <ProductHandStage ref={handStage} />
+            </Suspense>
+          </LocalErrorBoundary>
         </figure>
         <h1 className="product-headline product-emerge" style={{ '--emerge': 900 } as CSSProperties}>
           {tr('Do primeiro passo', 'From the first step')}
