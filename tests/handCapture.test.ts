@@ -111,6 +111,55 @@ describe('HandClient capture loop', () => {
     client.dispose();
   });
 
+  it('sends a VideoFrame without a bitmap copy when the video already fits the delegate', async () => {
+    const createImageBitmapMock = vi.fn();
+    const frames: { close: () => void; init: VideoFrameInit }[] = [];
+    stubBrowser();
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock);
+    vi.stubGlobal(
+      'VideoFrame',
+      class {
+        close = vi.fn();
+        constructor(_video: unknown, readonly init: VideoFrameInit) {
+          frames.push(this);
+        }
+      },
+    );
+
+    const client = makeClient();
+    await client.init({ onStatus: vi.fn() });
+    const worker = FakeWorker.instance!;
+    const video = makeVideo();
+    client.beginCapture(video, vi.fn());
+    video.fireFrame(10);
+
+    expect(createImageBitmapMock).not.toHaveBeenCalled();
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.init.timestamp).toBe(10_000);
+    expect(worker.transfers.at(-1)).toEqual([frames[0]]);
+    client.dispose();
+  });
+
+  it('downscales to a quarter of the pixels once the worker is on CPU', async () => {
+    const createImageBitmapMock = vi.fn(async () => ({ close: vi.fn() }) as unknown as ImageBitmap);
+    const videoFrame = vi.fn();
+    stubBrowser();
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock);
+    vi.stubGlobal('VideoFrame', videoFrame);
+
+    const client = makeClient();
+    await client.init({ onStatus: vi.fn() });
+    FakeWorker.instance!.reply({ type: 'FALLBACK', from: 'GPU', to: 'CPU', reason: 'slow' });
+    const video = makeVideo();
+    client.beginCapture(video, vi.fn());
+    video.fireFrame(10);
+    await flushCapture();
+
+    expect(videoFrame).not.toHaveBeenCalled();
+    expect(createImageBitmapMock).toHaveBeenCalledWith(video, { resizeWidth: 320, resizeQuality: 'low' });
+    client.dispose();
+  });
+
   it('closes a stale bitmap and keeps backpressure across a capture restart', async () => {
     const resolveBitmaps: ((value: ImageBitmap) => void)[] = [];
     const bitmap = { close: vi.fn() } as unknown as ImageBitmap;

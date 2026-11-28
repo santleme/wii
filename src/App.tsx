@@ -94,7 +94,8 @@ export default function App({ exit }: { exit?: ReactNode }) {
 
   useEffect(() => {
     void navigator.permissions?.query({ name: 'camera' as PermissionName }).then((permission) => {
-      if (permission.state === 'granted') PoseClient.warmVisionAssets();
+      // The app opens on a hand-driven menu; pose assets are warmed on the way into a game.
+      if (permission.state === 'granted') HandClient.warmVisionAssets();
     }).catch(() => undefined);
     return () => {
       cameraAttemptRef.current += 1;
@@ -105,6 +106,10 @@ export default function App({ exit }: { exit?: ReactNode }) {
       audioRef.current.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    if (screen === 'games') PoseClient.warmVisionAssets();
+  }, [screen]);
 
   const onEngine = useCallback((engine: GameEngineHandle | null) => { engineRef.current = engine; }, []);
   const dispatchEvent = useCallback((event: SportActionEvent) => {

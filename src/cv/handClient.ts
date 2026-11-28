@@ -12,6 +12,22 @@ function defaultHandAssets(): HandClientAssets {
   };
 }
 
+/** Undefined when the video needs downscaling or VideoFrame cannot be built from it. */
+function directFrame(video: HTMLVideoElement, now: number, maxWidth: number): VideoFrame | undefined {
+  if (typeof VideoFrame === 'undefined' || video.videoWidth > maxWidth) return undefined;
+  try {
+    // VideoFrame timestamps are integer microseconds.
+    return new VideoFrame(video, { timestamp: Math.round(now * 1000) });
+  } catch {
+    return undefined;
+  }
+}
+
+/** Widest video sent as is on the GPU delegate; wider video is downscaled on the bitmap path. */
+const GPU_FRAME_WIDTH = 640;
+/** CPU inference reads the pixels back, so a quarter of them is worth the resize. */
+const CPU_FRAME_WIDTH = 320;
+
 export class HandClient extends CoreHandClient {
   private captureSession = 0;
   private rafId?: number;
@@ -57,9 +73,12 @@ export class HandClient extends CoreHandClient {
       const aspectY = video.videoHeight / video.videoWidth;
       const flight = {};
       this.captureInFlight = flight;
-      let bitmap: ImageBitmap | undefined;
+      let bitmap: ImageBitmap | VideoFrame | undefined;
       try {
-        bitmap = await createImageBitmap(video, { resizeWidth: 640, resizeQuality: 'low' });
+        const maxWidth = this.delegate === 'CPU' ? CPU_FRAME_WIDTH : GPU_FRAME_WIDTH;
+        // Synchronous when possible: no await means no session change can slip in before the post.
+        bitmap = directFrame(video, now, maxWidth);
+        bitmap ??= await createImageBitmap(video, { resizeWidth: maxWidth, resizeQuality: 'low' });
         if (this.captureSession !== session) {
           bitmap.close();
           return;

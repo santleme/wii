@@ -111,7 +111,7 @@ export class HandClient {
    * Processes at most one frame at a time. The bitmap is transferred and closed by the worker when
    * accepted; otherwise it is closed here. Busy frames are dropped instead of queued.
    */
-  processFrame(bitmap: ImageBitmap, timestampMs: number): Promise<HandSnapshot | undefined> {
+  processFrame(bitmap: ImageBitmap | VideoFrame, timestampMs: number): Promise<HandSnapshot | undefined> {
     if (!Number.isFinite(timestampMs) || timestampMs < 0) {
       bitmap.close();
       return Promise.reject(new RangeError('Frame timestamp must be a finite, non-negative number.'));
