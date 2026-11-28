@@ -20,6 +20,8 @@ export function CameraPip(props: Props) {
     className={expanded ? 'cam-pip expanded' : 'cam-pip'}
   >
     <div className="cam-feed">
+      {/* Invariante (PR #40): este <video> nunca monta sob condição — trocar o elemento
+          faz o videoRef perder o srcObject e quebra a captura. Não condicionar. */}
       <video ref={props.videoRef} autoPlay muted playsInline />
       <canvas ref={props.canvasRef} />
       {!props.cameraOn && <div className="cam-empty"><strong>SEM SINAL</strong><small>processado neste dispositivo</small></div>}
