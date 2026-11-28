@@ -41,12 +41,13 @@ export class HandSwipeDetector {
 
   constructor(options: HandSwipeOptions = {}) {
     this.options = {
-      minSpeed: 1.6,
+      // Above the peak of a quick cursor reach (about 2.25 widths/s for 0.3 width in 250ms).
+      minSpeed: 2.5,
       minDurationMs: 50,
       rearmSpeed: 0.5,
       cooldownMs: 350,
       reverseGuardMs: 700,
-      maxFrameGapMs: 150,
+      maxFrameGapMs: 250,
       ...options,
     };
   }

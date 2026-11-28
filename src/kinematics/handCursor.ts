@@ -340,7 +340,7 @@ export class HandCursorDetector {
         this.fistActive ||
         closedFist(points, false, this.fistEnterStraightness, this.fistReleaseStraightness, aspectY),
     });
-    // Fingers touching mid-swipe must not click: they have to part again first.
+    // Fingers touching mid-swipe, or right after it, must not click: they have to part again first.
     if (swipe.moving) this.pinchNeedsRelease = true;
     if (this.synced) {
       const updatePinch = () => {
@@ -348,7 +348,8 @@ export class HandCursorDetector {
         if (this.pinchNeedsRelease) {
           this.pinchActive = false;
           this.pinchCandidateSinceMs = undefined;
-          if (ratio >= this.pinchOffRatio) this.pinchNeedsRelease = false;
+          // Fingers seen apart mid-swipe do not count: the release has to happen once the hand slows.
+          if (ratio >= this.pinchOffRatio && !swipe.moving) this.pinchNeedsRelease = false;
           return;
         }
         if (this.pinchActive) {

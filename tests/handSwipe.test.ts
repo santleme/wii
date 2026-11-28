@@ -12,8 +12,8 @@ function feed(detector: HandSwipeDetector, startMs: number, xs: readonly number[
 }
 
 const rest = [0.5, 0.5, 0.5];
-const leftward = [0.43, 0.36, 0.29, 0.22];
-const rightward = [0.57, 0.64, 0.71, 0.78];
+const leftward = [0.4, 0.3, 0.2, 0.1];
+const rightward = [0.6, 0.7, 0.8, 0.9];
 
 describe('hand swipe detector', () => {
   it('fires one wheel step per swipe, next for a leftward hand and previous for a rightward one', () => {
@@ -27,11 +27,37 @@ describe('hand swipe detector', () => {
     expect(feed(new HandSwipeDetector(), 0, [...rest, 0.8, 0.8, 0.8])).toEqual([]);
   });
 
+  it('ignores a quick cursor reach, with its bell-shaped speed profile', () => {
+    for (const [distance, durationMs] of [
+      [0.3, 250],
+      [0.35, 300],
+    ] as const) {
+      const reach = Array.from({ length: 12 }, (_, index) => {
+        const t = Math.min(1, ((index + 1) * 33) / durationMs);
+        return 0.5 + distance * (10 * t ** 3 - 15 * t ** 4 + 6 * t ** 5);
+      });
+      expect(feed(new HandSwipeDetector(), 0, [...rest, ...reach])).toEqual([]);
+    }
+  });
+
+  it('still reads a swipe from a slow 10fps camera', () => {
+    const detector = new HandSwipeDetector();
+    const pulses = [0.8, 0.8, 0.5, 0.2].map(
+      (x, index) => detector.update({ timestampMs: index * 200, x, y: 0.5, blocked: false }).direction,
+    );
+    expect(pulses.every((direction) => direction === 0)).toBe(true); // 1.5 widths/s: pointing
+    const fast = new HandSwipeDetector();
+    const swiped = [0.8, 0.8, 0.5, 0.2].map(
+      (x, index) => fast.update({ timestampMs: index * 100, x, y: 0.5, blocked: false }).direction,
+    );
+    expect(swiped).toEqual([0, 0, 0, 1]);
+  });
+
   it('ignores a mostly vertical movement', () => {
     const detector = new HandSwipeDetector();
     const pulses = [0, 1, 2, 3, 4, 5, 6].map((index) => {
       const step = Math.max(0, index - 2);
-      return detector.update({ timestampMs: index * 33, x: 0.5 + step * 0.06, y: 0.2 + step * 0.1, blocked: false })
+      return detector.update({ timestampMs: index * 33, x: 0.5 + step * 0.09, y: 0.2 + step * 0.13, blocked: false })
         .direction;
     });
     expect(pulses.every((direction) => direction === 0)).toBe(true);
@@ -39,26 +65,26 @@ describe('hand swipe detector', () => {
 
   it('needs the hand to rest before the next swipe and honours the cooldown', () => {
     const detector = new HandSwipeDetector();
-    const long = Array.from({ length: 20 }, (_, index) => 0.5 - (index + 1) * 0.07);
+    const long = Array.from({ length: 20 }, (_, index) => 0.5 - (index + 1) * 0.1);
     expect(feed(detector, 0, [...rest, ...long])).toEqual([1]);
 
     const quick = new HandSwipeDetector();
     expect(feed(quick, 0, [...rest, ...leftward])).toEqual([1]);
-    expect(feed(quick, 231, [0.22, 0.22, 0.15, 0.08, 0.01])).toEqual([]); // 99ms after: still cooling
+    expect(feed(quick, 231, [0.1, 0.1, 0, -0.1, -0.2])).toEqual([]); // 99ms after: still cooling
     expect(feed(quick, 600, [0.5, 0.5, ...leftward])).toEqual([1]);
   });
 
   it('does not read the hand returning to its place as a swipe back', () => {
     const detector = new HandSwipeDetector();
     expect(feed(detector, 0, [...rest, ...leftward])).toEqual([1]);
-    expect(feed(detector, 231, [0.22, 0.22, 0.29, 0.36, 0.43, 0.5])).toEqual([]);
+    expect(feed(detector, 231, [0.1, 0.1, 0.2, 0.3, 0.4, 0.5])).toEqual([]);
     expect(feed(detector, 1200, [0.5, 0.5, ...rightward])).toEqual([-1]);
   });
 
   it('stays quiet while blocked and requires rest after the block', () => {
     const detector = new HandSwipeDetector();
     expect(feed(detector, 0, [...rest, ...leftward], true)).toEqual([]);
-    expect(feed(detector, 231, [0.15, 0.08, 0.01])).toEqual([]);
+    expect(feed(detector, 231, [0, -0.1, -0.2])).toEqual([]);
   });
 
   it('does not bridge a long gap between samples', () => {
@@ -77,7 +103,7 @@ describe('hand cursor swipe arbitration', () => {
   /** Synchronizes at rest, then moves the raw camera anchor right (leftward on the mirrored screen). */
   function run(moving: Options, detector = new HandCursorDetector()): HandCursorState[] {
     for (let time = 0; time <= 300; time += 33) detector.update(hand(time, { tipX: 0.3 }));
-    return [1, 2, 3, 4, 5].map((step) => detector.update(hand(297 + step * 33, { ...moving, tipX: 0.3 + step * 0.07 })));
+    return [1, 2, 3, 4, 5].map((step) => detector.update(hand(297 + step * 33, { ...moving, tipX: 0.3 + step * 0.1 })));
   }
   const pulses = (states: readonly HandCursorState[]) => states.map((state) => state.swipeDirection).filter(Boolean);
 
@@ -88,11 +114,15 @@ describe('hand cursor swipe arbitration', () => {
   it('does not click when the fingers touch during a swipe, until they part again', () => {
     const detector = new HandCursorDetector();
     for (let time = 0; time <= 300; time += 33) detector.update(hand(time, { tipX: 0.3 }));
-    detector.update(hand(333, { tipX: 0.37 }));
+    detector.update(hand(333, { tipX: 0.4 }));
     const touching = [366, 399, 432, 465, 498].map((time) =>
-      detector.update(hand(time, { tipX: 0.37 + (time - 333) * 0.002, pinchRatio: 0.2 })),
+      detector.update(hand(time, { tipX: 0.4 + (time - 333) * 0.002, pinchRatio: 0.2 })),
     );
     expect(touching.every((state) => !state.pinchRelease && !state.pinching)).toBe(true);
+
+    for (const time of [531, 564, 597]) detector.update(hand(time, { tipX: 0.73, pinchRatio: 0.8 }));
+    const clicks = [630, 663, 696, 729].map((time) => detector.update(hand(time, { tipX: 0.73, pinchRatio: 0.2 })));
+    expect(clicks.some((state) => state.pinchRelease)).toBe(true);
   });
 
   it('is blocked by a held pinch and by a closed fist', () => {
@@ -100,7 +130,7 @@ describe('hand cursor swipe arbitration', () => {
     for (let time = 0; time <= 300; time += 33) detector.update(hand(time, { tipX: 0.3 }));
     for (let time = 333; time <= 500; time += 33) detector.update(hand(time, { tipX: 0.3, pinchRatio: 0.2 }));
     const dragged = [1, 2, 3, 4].map((step) =>
-      detector.update(hand(495 + step * 33, { tipX: 0.3 + step * 0.07, pinchRatio: 0.2 })),
+      detector.update(hand(495 + step * 33, { tipX: 0.3 + step * 0.1, pinchRatio: 0.2 })),
     );
     expect(pulses(dragged)).toEqual([]);
     expect(pulses(run({ curl: 1 }))).toEqual([]);
@@ -115,7 +145,7 @@ describe('hand cursor swipe arbitration', () => {
     });
     for (let time = 0; time <= 300; time += 33) detector.update(sample(time, 0, 0.3));
     const states = Array.from({ length: 8 }, (_, index) =>
-      detector.update(sample(333 + index * 33, (index + 1) * 6, 0.3 + (index + 1) * 0.07)),
+      detector.update(sample(333 + index * 33, (index + 1) * 6, 0.3 + (index + 1) * 0.1)),
     );
     expect(states.every((state) => state.rotationPhase !== 'IDLE')).toBe(true);
     expect(pulses(states)).toEqual([]);
@@ -125,7 +155,7 @@ describe('hand cursor swipe arbitration', () => {
     const detector = new HandCursorDetector();
     for (let time = 0; time <= 300; time += 33) detector.update(hand(time, { tipX: 0.3 }));
     detector.update(emptyHand(333));
-    const reacquired = [366, 399, 432].map((time, index) => detector.update(hand(time, { tipX: 0.5 + index * 0.07 })));
+    const reacquired = [366, 399, 432].map((time, index) => detector.update(hand(time, { tipX: 0.5 + index * 0.1 })));
     expect(pulses(reacquired)).toEqual([]);
   });
 });
