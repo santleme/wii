@@ -1,10 +1,11 @@
 import type { CalibrationProfile, ContinuousControls, Hand, PoseSnapshot, SportActionEvent, TrackingState } from '@wii/spatial-core';
+import { READINESS_NEUTRAL_MIN01, READINESS_SCALE_MIN01 } from '@wii/spatial-core';
 import { LateralDashTracker, PunchInFlight } from './boxingLocomotion';
 import { CadenceTracker } from './cadenceTracker';
 import { upsideDown } from './framing';
 import { IntensityMeter } from './intensity';
 import { JumpDetector } from './jumpDetector';
-import { DodgeZoneTracker, DuckTracker, LanePositionTracker, REFERENCE_VETO_SPEED_SW_PER_S, RingDepthTracker, ShoulderLineVerticalSpeed } from './postureSignals';
+import { DodgeZoneTracker, DuckTracker, LanePositionTracker, RingDepthTracker } from './postureSignals';
 import { isGuardingPose, PunchDetector, type PunchDiagnostics } from './punchDetector';
 import { classifyPunch } from './punchClassifier';
 import { type ArmMotion, ArmMotionDetector } from './armMotion';
@@ -48,12 +49,6 @@ export class ActionPipeline {
   private readonly ringDepth = new RingDepthTracker();
   private readonly lateralDash = new LateralDashTracker();
   private readonly duckTracker = new DuckTracker();
-  private readonly shoulderSpeed = new ShoulderLineVerticalSpeed();
-  /** Frames where the torso reference moved fast, trimmed to the longest punch window: confirmation
-   * evidence measured while the reference itself moved is torso motion, not arm motion — so a punch
-   * whose onset raced ahead of the veto is still discarded at confirmation, the same adjudication
-   * pattern as the tennis contact. */
-  private referenceVetoAtMs: number[] = [];
   private readonly punchInFlight = new PunchInFlight();
   /** One detector per wrist: whichever arm swings is the racket hand. */
   private readonly swings = ([['right', 16], ['left', 15]] as const).map(([hand, wrist]) => (
@@ -156,7 +151,7 @@ export class ActionPipeline {
       if (zone !== undefined) controls = { ...controls, laneZone: zone };
     }
 
-    const swingScaleReady = calibration !== undefined && (calibration.readiness?.scale01 ?? 1) >= 0.5;
+    const swingScaleReady = calibration !== undefined && (calibration.readiness?.scale01 ?? 1) >= READINESS_SCALE_MIN01;
     if (!swingScaleReady) this.heldSwing = undefined;
     const results = this.swings.map(({ wrist, gate, detector, hand }) => {
       const worldHipsVisible = Boolean(
@@ -214,21 +209,12 @@ export class ActionPipeline {
       controls = { ...controls, guard: isGuardingPose(current, calibration) };
     }
 
-    // The torso reference in fast vertical motion manufactures wrist-relative motion that is
-    // not punching — ducking reads exactly like a rising uppercut. Veto onsets while it lasts.
-    const shoulderNow = this.shoulderSpeed.update(current);
-    // Only the descent manufactures the observed phantom: fists resting in world while the
-    // shoulders drop read as a rising extended arm — an uppercut. The speed estimate lags the
-    // drop by a frame, so the veto is also enforced retroactively at confirmation below.
-    const vetoOnset = shoulderNow !== undefined && shoulderNow >= REFERENCE_VETO_SPEED_SW_PER_S;
-    if (vetoOnset) this.referenceVetoAtMs.push(snapshot.timestampMs);
-    while (this.referenceVetoAtMs[0] && snapshot.timestampMs - this.referenceVetoAtMs[0] > 600) this.referenceVetoAtMs.shift();
     for (const { hand, elbow, wrist, gate, detector } of this.punches) {
       const tracking = gate.evaluate(snapshot, [11, 12, 23, 24, elbow, wrist], 'world');
       if (tracking.state === 'lost' || !swingScaleReady) detector.reset();
       else if (tracking.state === 'degraded') detector.interruptRearm();
       if (!calibration || !swingScaleReady || tracking.state === 'lost') continue;
-      const output = detector.update(current, calibration, vetoOnset);
+      const output = detector.update(current, calibration);
       if (output?.kind === 'onset') {
         this.punchInFlight.start(hand, snapshot.timestampMs);
         events.push({ ...this.eventBase(snapshot, tracking.confidence), id: this.nextId++, type: 'punch-start', hand });
@@ -252,7 +238,7 @@ export class ActionPipeline {
     }
 
     // Boxing's footwork signals need the calibrated neutral, and read the torso the vertical channel does.
-    if (calibration && (calibration.readiness?.neutral01 ?? 1) >= 0.65 && footworkTracked) {
+    if (calibration && (calibration.readiness?.neutral01 ?? 1) >= READINESS_NEUTRAL_MIN01 && footworkTracked) {
       const dodge = this.dodge.update(current, calibration);
       if (dodge !== undefined) controls = { ...controls, dodgeZone: dodge };
       // Read after the punch detectors, so the frame of a punch onset is already frozen.

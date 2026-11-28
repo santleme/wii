@@ -82,10 +82,9 @@ export function poseWithWorldShoulderWidth(timestampMs: number, width: number, w
 
 export function calibration(): CalibrationProfile {
   return {
-    version: 3, completedAtMs: 3000,
+    version: 3,
     world: { shoulderWidth: 0.4, readyWristLocal: { left: { x: 0, y: -1.25, z: 0 }, right: { x: 0, y: -1.25, z: 0 } } },
     image: { shoulderCenterX0: 0.5 },
-    quality: { validFrameRatio: 1, medianConfidence: 0.95 },
   };
 }
 

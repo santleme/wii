@@ -1,9 +1,12 @@
 import type { Delegate, Hand, Point3, TrackingState } from '../types';
 
 export type { Delegate, Hand, Point3, PoseSnapshot, TrackingState } from '../types';
+/** Readiness gates for calibration-dependent controls: below these, the estimate is not trusted yet. */
+export const READINESS_SCALE_MIN01 = 0.5;
+export const READINESS_NEUTRAL_MIN01 = 0.65;
+
 export interface CalibrationProfile {
   version: 3;
-  completedAtMs: number;
   world: {
     shoulderWidth: number;
     /** Each wrist relative to its own shoulder; each hand has an independent optional reference. */
@@ -22,7 +25,6 @@ export interface CalibrationProfile {
      */
     shoulderWidth0?: number;
   };
-  quality: { validFrameRatio: number; medianConfidence: number };
   /**
    * Per-control convergence, when the profile comes from an online estimator. Missing means
    * a traditionally completed profile, so consumers treat every control as ready.
@@ -48,13 +50,6 @@ export interface PunchTrajectorySample {
   /** Unfiltered articulation cosine: the filtered one lags brief extensions below their peak. */
   rawElbowCosine?: number;
   confidence: number;
-  /**
-   * Wrist position in the body basis frozen at the punch's onset, in shoulder widths. The
-   * shoulder-relative coordinates above rotate and translate with the torso, so a punch thrown
-   * with torso rotation manufactures lateral sweep that never happened in the world; the frozen
-   * frame keeps the wrist's true displacement geometry.
-   */
-  frozen?: { lateral: number; vertical: number; forward: number };
 }
 
 /** Compact trajectory measurement captured from punch onset through confirmation. */
@@ -66,8 +61,6 @@ export interface PunchMeasurement {
   /** Sample with the greatest forward extension, the contact proxy. */
   readonly contact: PunchTrajectorySample;
   readonly end: PunchTrajectorySample;
-  /** Index of the onset sample inside `samples`; shape features live between it and contact. */
-  readonly onsetIndex?: number;
   readonly durationMs: number;
   readonly forwardTravel: number;
   readonly lateralExcursion: number;
