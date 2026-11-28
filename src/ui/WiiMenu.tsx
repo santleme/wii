@@ -90,8 +90,6 @@ export function HomeMenu({ onGames, exit, handInputRef, rotationGateRef, carouse
   const controllerRef = useRef<CarouselController | null>(null);
   controllerRef.current ??= new CarouselController({ slotCount: SLOTS.length, reducedMotion });
   const controller = controllerRef.current;
-  // A câmera desligada/sem mão sincronizada estaciona o loop: mouse e CSS continuam independentes dele.
-  const handRotationAvailable = handInputRef.current.visible && handInputRef.current.synced;
 
   useEffect(() => {
     controller.setReducedMotion(reducedMotion);
@@ -118,7 +116,9 @@ export function HomeMenu({ onGames, exit, handInputRef, rotationGateRef, carouse
   }, []);
 
   useEffect(() => {
-    if (!ring || !ringReady || zoom !== undefined || !handRotationAvailable) return;
+    // O loop vive com a roda pronta, com ou sem mão: ele lê a amostra a cada frame, então uma
+    // perda curta não o remonta, e com a mão ociosa mouse e CSS seguem independentes.
+    if (!ring || !ringReady || zoom !== undefined) return;
     const ringElement = ringRef.current;
     if (!ringElement) return;
     let rafId: number | undefined;
@@ -153,7 +153,7 @@ export function HomeMenu({ onGames, exit, handInputRef, rotationGateRef, carouse
       ringElement.classList.remove('is-gesture-controlled');
       if (carouselDebugRef) carouselDebugRef.current = undefined;
     };
-  }, [ring, ringReady, zoom, handRotationAvailable, controller, paintTurn, handInputRef, rotationGateRef, carouselDebugRef]);
+  }, [ring, ringReady, zoom, controller, paintTurn, handInputRef, rotationGateRef, carouselDebugRef]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { introduced = true; setRing(true); }, ring ? 0 : GRID_MS);

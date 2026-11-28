@@ -13,7 +13,8 @@ import { GameCanvas, type GameEngineHandle, type Sport } from './ui/GameCanvas';
 import { HandCursor } from './ui/HandCursor';
 import { HandDebugOverlay } from './ui/HandDebugOverlay';
 import { HandPanel } from './ui/HandPanel';
-import { HAND_IDLE, type HandCursorInput } from './ui/handCursorTypes';
+import { HAND_IDLE } from './ui/handCursorTypes';
+import { createHandInputStore, useHandInput } from './ui/handInputStore';
 import type { CarouselStepResult } from './ui/carouselController';
 import { drawHand, drawPose } from './ui/PoseOverlay';
 import { GamesMenu, HomeMenu, TitleMenu } from './ui/WiiMenu';
@@ -59,8 +60,9 @@ export default function App({ exit }: { exit?: ReactNode }) {
   const [tracking, setTracking] = useState('SEM POSE');
   const [muted, setMuted] = useState(readMutedPreference);
   const [handPanelOpen, setHandPanelOpen] = useState(false);
-  const [handInput, setHandInput] = useState(HAND_IDLE);
-  const handInputRef = useRef<HandCursorInput>(HAND_IDLE);
+  // Hand samples stay out of React state: App re-renders only when synchronization flips.
+  const [handStore] = useState(createHandInputStore);
+  const handSynced = useHandInput(handStore, (hand) => hand.current.synced);
   const homeRotationGateRef = useRef(false);
   const carouselDebugRef = useRef<CarouselStepResult | undefined>(undefined);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -82,11 +84,6 @@ export default function App({ exit }: { exit?: ReactNode }) {
   const profileRef = useRef<CalibrationProfile | undefined>(undefined);
   const audioRef = useRef(new ProceduralAudio());
   const cameraAttemptRef = useRef(0);
-
-  const publishHandInput = useCallback((next: HandCursorInput) => {
-    handInputRef.current = next;
-    setHandInput(next);
-  }, []);
 
   useEffect(() => {
     audioRef.current.setMuted(muted);
@@ -136,7 +133,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
     setCameraOn(false);
     setTracking('SEM POSE');
     setCameraStatus('Câmera desligada');
-    publishHandInput(HAND_IDLE);
+    handStore.publish(HAND_IDLE);
     handDetectorRef.current.reset();
     for (const event of pipelineRef.current.reset()) dispatchEvent(event);
     engineRef.current?.resetLaneZone?.();
@@ -148,7 +145,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
     resetCalibration();
     drawPose(overlayRef.current, videoRef.current);
     drawHand(handOverlayRef.current, videoRef.current);
-  }, [dispatchEvent, publishHandInput, resetCalibration]);
+  }, [dispatchEvent, handStore, resetCalibration]);
 
   const poseCallbacksRef = useRef<PoseClientCallbacks | undefined>(undefined);
   poseCallbacksRef.current = {
@@ -206,7 +203,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
         aspectY,
         rotationEnabled: screenRef.current === 'home' && homeRotationGateRef.current,
       });
-      publishHandInput({
+      handStore.publish({
         visible: state.visible,
         x: state.x * window.innerWidth,
         y: state.y * window.innerHeight,
@@ -230,7 +227,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
     }, (error) => {
       if (!stale()) setCameraStatus(error.message);
     });
-  }, [publishHandInput, stopCamera]);
+  }, [handStore, stopCamera]);
 
   const startPoseCapture = useCallback(async (video: HTMLVideoElement, attempt: number) => {
     const stale = () => cameraAttemptRef.current !== attempt;
@@ -265,7 +262,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
     if (visionModeRef.current === next) return;
     visionModeRef.current = next;
     handDetectorRef.current.reset();
-    publishHandInput(HAND_IDLE);
+    handStore.publish(HAND_IDLE);
     const video = videoRef.current;
     if (!cameraOn || !video || !streamRef.current) return;
 
@@ -286,7 +283,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
         }
       });
     }
-  }, [screen, cameraOn, startHandCapture, startPoseCapture, publishHandInput]);
+  }, [screen, cameraOn, startHandCapture, startPoseCapture, handStore]);
 
   const startCamera = useCallback(async () => {
     stopCamera();
@@ -398,7 +395,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
       <HomeMenu
         exit={exit}
         onGames={() => setScreen('games')}
-        handInputRef={handInputRef}
+        handInputRef={handStore}
         rotationGateRef={homeRotationGateRef}
         carouselDebugRef={carouselDebugRef}
       />
@@ -412,11 +409,11 @@ export default function App({ exit }: { exit?: ReactNode }) {
     </div>}
 
     {menu && handPanelOpen && <HandPanel
-      sourceRef={videoRef} canvasRef={handOverlayRef} cameraOn={cameraOn} status={cameraStatus} synced={handInput.synced}
+      sourceRef={videoRef} canvasRef={handOverlayRef} cameraOn={cameraOn} status={cameraStatus} synced={handSynced}
       onStart={() => void startCamera()} onClose={closeHandPanel}
     />}
-    <HandCursor input={handInput} active={menu && cameraOn} onBack={handBack} />
-    {menu && cameraOn && <HandDebugOverlay input={handInput} carouselRef={carouselDebugRef} />}
+    <HandCursor store={handStore} active={menu && cameraOn} onBack={handBack} />
+    {menu && cameraOn && <HandDebugOverlay store={handStore} carouselRef={carouselDebugRef} />}
 
     <CameraPip
       hidden={menu && handPanelOpen}

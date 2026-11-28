@@ -132,25 +132,35 @@ describe('HomeMenu rotational carousel integration', () => {
     });
   });
 
-  it('cancels the carousel rAF when camera hand input becomes unavailable', () => {
+  it('keeps one loop through a momentary hand loss and drives again without a re-render', () => {
     mockReducedMotion();
     const raf = mockRaf();
-    const input: HandCursorInput = { ...HAND_IDLE, visible: true, synced: true };
-    const rendered = renderHome(input);
-    expect(raf.callbacks.size).toBe(1);
-    rendered.handInputRef.current = HAND_IDLE;
+    const rotating: HandCursorInput = {
+      ...HAND_IDLE,
+      visible: true,
+      synced: true,
+      capturedAtMs: 1000,
+      rotationPhase: 'ROTATING',
+      rotationAngularVelocity: 180,
+      rotationDirection: 1,
+    };
+    const { container, root, handInputRef } = renderHome(HAND_IDLE);
+    const firstChannel = container.querySelector<HTMLElement>('.channel')!;
     act(() => {
-      rendered.root.render(createElement(HomeMenu, {
-        onGames: vi.fn(),
-        exit: null,
-        handInputRef: rendered.handInputRef,
-        rotationGateRef: rendered.rotationGateRef,
-        carouselDebugRef: rendered.carouselDebugRef,
-      }));
+      raf.fire(1000);
     });
-    expect(raf.callbacks.size).toBe(0);
+    expect(firstChannel.style.left).toBe('50%');
+    expect(raf.callbacks.size).toBe(1);
+
+    handInputRef.current = rotating;
     act(() => {
-      rendered.root.unmount();
+      raf.fire(1016);
+      raf.fire(1032);
+    });
+    expect(firstChannel.style.left).not.toBe('50%');
+    expect(raf.callbacks.size).toBe(1);
+    act(() => {
+      root.unmount();
     });
   });
 

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CarouselStepResult } from './carouselController';
-import type { HandCursorInput } from './handCursorTypes';
+import type { HandInputStore } from './handInputStore';
 
 interface Props {
-  input: HandCursorInput;
+  store: HandInputStore;
   carouselRef: { current: CarouselStepResult | undefined };
 }
 
@@ -17,7 +17,7 @@ function velocityText(value: number | undefined): string {
 }
 
 /** Overlay de diagnóstico real do pipeline de mão/carrossel; só existe com ?handDebug=1. */
-export function HandDebugOverlay({ input, carouselRef }: Props) {
+export function HandDebugOverlay({ store, carouselRef }: Props) {
   const enabled = useMemo(() => new URLSearchParams(window.location.search).get('handDebug') === '1', []);
   const [, setRefresh] = useState(0);
   useEffect(() => {
@@ -27,6 +27,7 @@ export function HandDebugOverlay({ input, carouselRef }: Props) {
   }, [enabled]);
   if (!enabled) return null;
 
+  const input = store.current;
   const carousel = carouselRef.current;
   const dtMs = input.rotationDtMs;
   const fps = dtMs && dtMs > 0 ? 1000 / dtMs : undefined;
