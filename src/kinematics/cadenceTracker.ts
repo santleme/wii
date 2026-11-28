@@ -20,7 +20,20 @@ const LATERAL_MIN_SPAN_MS = 500;
 /** Between the highest arm-waving stretch (0.033) and the lowest running one (0.052). */
 const LATERAL_ACTIVE_SW = 0.042;
 
-export interface CadenceResult { cadenceSpm: number; speed01: number; step?: 'left' | 'right'; running: boolean }
+/**
+ * The locomotion state one result describes, derived in one place from the tracker's evidence.
+ * It is not a synonym for `running`: that flag is the effort gate's trust, which stays open
+ * through stride gaps and over walking, while the verdict names what the body is doing on
+ * this frame —
+ * - `idle`: no bounce, no weight-shift walking, no trust held.
+ * - `walking`: the weight-shift detector owns the motion and the bounce channel is quiet.
+ * - `warming`: the bounce channel says moving, but the trust has not been earned yet.
+ * - `running`: moving, with the trust earned.
+ * - `bridging`: no motion on this frame, but the trust is still held open through the gap.
+ */
+export type CadenceVerdict = 'idle' | 'walking' | 'warming' | 'running' | 'bridging';
+
+export interface CadenceResult { cadenceSpm: number; speed01: number; step?: 'left' | 'right'; running: boolean; verdict: CadenceVerdict }
 
 /** Assumed pace until two steps have been timed: a relaxed run in place. */
 const DEFAULT_SPM = 150;
@@ -206,10 +219,17 @@ export class CadenceTracker {
       && (this.lateralActive || strideEvidence)) this.trusted = true;
     // Running wins: its bounce also sways.
     if (!this.moving) return this.walking
-      ? { cadenceSpm: this.walkSpm, speed01: speedFromCadence(this.walkSpm), step, running: this.trusted }
-      : { cadenceSpm: 0, speed01: 0, step, running: this.trusted };
+      ? { cadenceSpm: this.walkSpm, speed01: speedFromCadence(this.walkSpm), step, running: this.trusted, verdict: this.verdict() }
+      : { cadenceSpm: 0, speed01: 0, step, running: this.trusted, verdict: this.verdict() };
     const cadenceSpm = this.intervals.length ? 60_000 / median(this.intervals) : DEFAULT_SPM;
-    return { cadenceSpm, speed01: speedFromCadence(cadenceSpm), step, running: this.trusted };
+    return { cadenceSpm, speed01: speedFromCadence(cadenceSpm), step, running: this.trusted, verdict: this.verdict() };
+  }
+
+  /** The one place the internal evidence becomes a named state; see CadenceVerdict. */
+  private verdict(): CadenceVerdict {
+    if (this.moving) return this.trusted ? 'running' : 'warming';
+    if (this.walking) return 'walking';
+    return this.trusted ? 'bridging' : 'idle';
   }
 
   reset(): void {
