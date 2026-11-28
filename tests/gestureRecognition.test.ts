@@ -164,7 +164,7 @@ describe('banded DTW gesture recognition', () => {
     expect(recognizer.recognize(query)).toBeUndefined();
   });
 
-  it('bounds gesture recordings, clones recorded frames, and cancels inconsistent feature dimensions', () => {
+  it('bounds gesture recordings, clones recorded frames, and survives inconsistent feature dimensions', () => {
     const recorder = new GestureRecorder({ minFrames: 2, maxFrames: 3 });
     recorder.start();
     const first = [1, 2];
@@ -183,6 +183,10 @@ describe('banded DTW gesture recognition', () => {
     recorder.start();
     recorder.addFrame([1]);
     expect(() => recorder.addFrame([1, 2])).toThrow(/dimension changed/);
-    expect(recorder.isRecording).toBe(false);
+    // The error is recoverable: the recording and the frames already in it survive.
+    expect(recorder.isRecording).toBe(true);
+    expect(recorder.frameCount).toBe(1);
+    recorder.addFrame([2]);
+    expect(recorder.finish()).toEqual([[1], [2]]);
   });
 });

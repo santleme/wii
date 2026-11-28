@@ -42,7 +42,8 @@ export class GestureRecorder {
       throw new RangeError('Gesture frames must contain finite feature values.');
     }
     if (this.dimension !== undefined && features.length !== this.dimension) {
-      this.cancel();
+      // Recoverable caller error: report it, but keep the frames already recorded —
+      // cancelling here would destroy a whole take over one malformed frame.
       throw new RangeError('Gesture feature dimension changed while recording.');
     }
     this.dimension ??= features.length;
