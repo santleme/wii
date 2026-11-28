@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HandCursorDetector, type MenuHandSnapshot } from '../src/kinematics/handCursor';
+import { HandCursorDetector, type MenuHandSnapshot, rotationBlocksHandInput } from '../src/kinematics/handCursor';
 import { emptyHand, hand } from './fixtures/menuHand';
 import { rotationalWorldLandmarks } from './fixtures/rotationalHand';
 
@@ -553,27 +553,42 @@ describe('hand cursor rotational flick arbitration', () => {
     expect(rotating!.rotationRawAngularVelocity).toBeGreaterThan(0);
   });
 
-  it('suppresses a held pinch during rotation and requires release before the next click', () => {
+  /** Rotates with an idle image hand until committed, then keeps turning with the given gesture. */
+  const commitThen = (gesture: Parameters<typeof rotationalMenuHand>[2]) => {
     const detector = syncRotational();
-    const rotating = rotate(detector, 216, 12, { pinchRatio: 0.2 });
-    expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
-    expect(rotating.every((state) => !state.pinchRelease && !state.pinching)).toBe(true);
+    const committing = rotate(detector, 216, 12);
+    expect(committing.at(-1)!.rotationPhase).toBe('ROTATING');
+    const during = Array.from({ length: 8 }, (_, index) =>
+      detector.update(rotationalMenuHand(408 + index * 16, 36 + index * 3, gesture)),
+    );
+    expect(during.every((state) => state.rotationPhase === 'ROTATING')).toBe(true);
+    return { detector, during };
+  };
 
-    const stillHeld = detector.update(rotationalMenuHand(500, 33, { pinchRatio: 0.2, rotationEnabled: false }));
+  it('suppresses a pinch begun during rotation and requires release before the next click', () => {
+    const { detector, during } = commitThen({ pinchRatio: 0.2 });
+    expect(during.every((state) => !state.pinchRelease && !state.pinching)).toBe(true);
+
+    const stillHeld = detector.update(rotationalMenuHand(540, 57, { pinchRatio: 0.2, rotationEnabled: false }));
     expect(stillHeld).toMatchObject({ pinchRelease: false, pinching: false });
-    detector.update(rotationalMenuHand(516, 33, { pinchRatio: 0.8, rotationEnabled: false }));
-    detector.update(rotationalMenuHand(532, 33, { pinchRatio: 0.2, rotationEnabled: false }));
-    const rearmed = detector.update(rotationalMenuHand(632, 33, { pinchRatio: 0.2, rotationEnabled: false }));
+    detector.update(rotationalMenuHand(556, 57, { pinchRatio: 0.8, rotationEnabled: false }));
+    detector.update(rotationalMenuHand(572, 57, { pinchRatio: 0.2, rotationEnabled: false }));
+    const rearmed = detector.update(rotationalMenuHand(672, 57, { pinchRatio: 0.2, rotationEnabled: false }));
     expect(rearmed.pinchRelease).toBe(true);
   });
 
   it('keeps back progress at zero during rotation and re-arms the fist afterwards', () => {
-    const detector = syncRotational();
-    const rotating = rotate(detector, 216, 12, { imageCurl: 1, pinchRatio: 0.2 });
-    expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
-    expect(rotating.every((state) => state.backProgress === 0)).toBe(true);
-    const after = detector.update(rotationalMenuHand(500, 33, { imageCurl: 1, pinchRatio: 0.2, rotationEnabled: false }));
+    const { detector, during } = commitThen({ imageCurl: 1 });
+    expect(during.every((state) => state.backProgress === 0)).toBe(true);
+    const after = detector.update(rotationalMenuHand(540, 57, { imageCurl: 1, rotationEnabled: false }));
     expect(after.backProgress).toBe(0);
+  });
+
+  it('lets a pinch under way finish its click instead of turning it into a rotation', () => {
+    const detector = syncRotational();
+    const states = rotate(detector, 216, 14, { pinchRatio: 0.2 });
+    expect(states.some((state) => state.pinchRelease)).toBe(true);
+    expect(states.every((state) => !rotationBlocksHandInput(state.rotationPhase))).toBe(true);
   });
 
   it('keeps following a rotation candidate and freezes only once rotation is committed', () => {
@@ -591,22 +606,16 @@ describe('hand cursor rotational flick arbitration', () => {
     expect(states.slice(firstRotating).every((state) => state.x === held.x && state.y === held.y)).toBe(true);
   });
 
-  it('does not click or go back from a candidate or from the frame that cancels it', () => {
-    for (const gesture of [{ pinchRatio: 0.2 }, { imageCurl: 1 }]) {
+  it('lets a mere candidate or its cancellation click and go back', () => {
+    for (const [gesture, outcome] of [
+      [{ pinchRatio: 0.2 }, 'pinchRelease'],
+      [{ imageCurl: 1 }, 'back'],
+    ] as const) {
       const detector = syncRotational();
-      // A long candidate: weak enough never to commit, held past the pinch press time.
-      const candidate = [216, 266, 316, 366].map((time, index) =>
-        detector.update(rotationalMenuHand(time, index === 0 ? 0 : 3, index === 0 ? {} : gesture)),
-      );
-      const cancelled = detector.update({
-        ...rotationalMenuHand(416, 3, { ...gesture, curl: 1 }),
-      });
-      const phases = [...candidate, cancelled].map((state) => state.rotationPhase);
-      expect(phases).toContain('ROTATION_CANDIDATE');
-      expect(phases).not.toContain('ROTATING');
-      expect([...candidate, cancelled].every((state) => !state.pinchRelease && state.backProgress === 0)).toBe(true);
-      const after = detector.update(rotationalMenuHand(466, 3, { ...gesture, curl: 1 }));
-      expect(after).toMatchObject({ pinchRelease: false, backProgress: 0 });
+      detector.update(rotationalMenuHand(216, 0));
+      expect(detector.update(rotationalMenuHand(266, 5)).rotationPhase).toBe('ROTATION_CANDIDATE');
+      const states = [316, 366, 416, 466].map((time) => detector.update(rotationalMenuHand(time, 5, gesture)));
+      expect(states.some((state) => (outcome === 'back' ? state.backProgress > 0 : state.pinchRelease))).toBe(true);
     }
   });
 

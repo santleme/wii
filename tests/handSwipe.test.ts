@@ -27,17 +27,31 @@ describe('hand swipe detector', () => {
     expect(feed(new HandSwipeDetector(), 0, [...rest, 0.8, 0.8, 0.8])).toEqual([]);
   });
 
-  it('ignores a quick cursor reach, with its bell-shaped speed profile', () => {
-    for (const [distance, durationMs] of [
-      [0.3, 250],
-      [0.35, 300],
-    ] as const) {
-      const reach = Array.from({ length: 12 }, (_, index) => {
-        const t = Math.min(1, ((index + 1) * 33) / durationMs);
-        return 0.5 + distance * (10 * t ** 3 - 15 * t ** 4 + 6 * t ** 5);
-      });
-      expect(feed(new HandSwipeDetector(), 0, [...rest, ...reach])).toEqual([]);
-    }
+  it('ignores an unhurried cursor reach, with its bell-shaped speed profile', () => {
+    const reach = Array.from({ length: 14 }, (_, index) => {
+      const t = Math.min(1, ((index + 1) * 33) / 400);
+      return 0.5 + 0.25 * (10 * t ** 3 - 15 * t ** 4 + 6 * t ** 5);
+    });
+    expect(feed(new HandSwipeDetector(), 0, [...rest, ...reach])).toEqual([]);
+  });
+
+  it('reads the swipe speed reached at playing distance, but not a diagonal pointer move', () => {
+    const modest = [0.44, 0.38, 0.32, 0.26]; // 1.8 widths/s
+    expect(feed(new HandSwipeDetector(), 0, [...rest, ...modest])).toEqual([1]);
+
+    const detector = new HandSwipeDetector();
+    const diagonal = [0, 1, 2, 3, 4, 5, 6].map((index) => {
+      const step = Math.max(0, index - 2);
+      return detector.update({ timestampMs: index * 33, x: 0.5 + step * 0.07, y: 0.2 + step * 0.065, blocked: false })
+        .direction;
+    });
+    expect(diagonal.every((direction) => direction === 0)).toBe(true);
+  });
+
+  it('allows a correction in the opposite direction after 450ms', () => {
+    const detector = new HandSwipeDetector();
+    expect(feed(detector, 0, [...rest, ...leftward])).toEqual([1]);
+    expect(feed(detector, 560, [0.1, 0.1, 0.2, 0.3, 0.4])).toEqual([-1]);
   });
 
   it('still reads a swipe from a slow 10fps camera', () => {
@@ -136,19 +150,33 @@ describe('hand cursor swipe arbitration', () => {
     expect(pulses(run({ curl: 1 }))).toEqual([]);
   });
 
-  it('is blocked while a palm rotation is in progress', () => {
+  const turning = (time: number, angle: number, tipX: number) => ({
+    ...hand(time, { tipX }),
+    worldLandmarks: rotationalWorldLandmarks(angle),
+    rotationEnabled: true,
+  });
+  const synchronized = () => {
     const detector = new HandCursorDetector();
-    const sample = (time: number, angle: number, tipX: number) => ({
-      ...hand(time, { tipX }),
-      worldLandmarks: rotationalWorldLandmarks(angle),
-      rotationEnabled: true,
-    });
-    for (let time = 0; time <= 300; time += 33) detector.update(sample(time, 0, 0.3));
-    const states = Array.from({ length: 8 }, (_, index) =>
-      detector.update(sample(333 + index * 33, (index + 1) * 6, 0.3 + (index + 1) * 0.1)),
+    for (let time = 0; time <= 300; time += 33) detector.update(turning(time, 0, 0.3));
+    return detector;
+  };
+
+  it('is blocked while a palm rotation is committed', () => {
+    const detector = synchronized();
+    for (let index = 1; index <= 8; index += 1) detector.update(turning(297 + index * 33, index * 6, 0.3));
+    const states = [1, 2, 3, 4].map((step) =>
+      detector.update(turning(561 + step * 33, (8 + step) * 6, 0.3 + step * 0.1)),
     );
-    expect(states.every((state) => state.rotationPhase !== 'IDLE')).toBe(true);
+    expect(states.every((state) => state.rotationPhase === 'ROTATING')).toBe(true);
     expect(pulses(states)).toEqual([]);
+  });
+
+  it('still swipes while the rotation is only a candidate', () => {
+    const detector = synchronized();
+    const states = [1, 2, 3].map((step) => detector.update(turning(297 + step * 33, step * 3, 0.3 + step * 0.1)));
+    expect(states.some((state) => state.rotationPhase === 'ROTATION_CANDIDATE')).toBe(true);
+    expect(states.some((state) => state.rotationPhase === 'ROTATING')).toBe(false);
+    expect(pulses(states)).toEqual([1]);
   });
 
   it('does not fire across a lost hand', () => {

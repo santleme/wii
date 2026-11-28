@@ -109,8 +109,8 @@ const FILTER_RESET_GAP_MS = 500;
 const PRESENCE_GAP_MS = 150;
 
 /**
- * True once a rotation is committed: the cursor freezes and hover is suspended. A mere candidate
- * or a cancelled one must not make the cursor stick, though neither may click or go back.
+ * True once a rotation is committed: the cursor freezes and hover, click, back and swipe are
+ * suspended. A mere candidate or a cancelled one takes nothing away from the hand.
  */
 export function rotationBlocksHandInput(phase: RotationalFlickPhase): boolean {
   return phase !== 'IDLE' && phase !== 'ROTATION_CANDIDATE' && phase !== 'CANCELLED';
@@ -316,7 +316,12 @@ export class HandCursorDetector {
     const smoothX = this.xFilter.filter(mapped.x, timestampMs);
     const smoothY = this.yFilter.filter(mapped.y, timestampMs);
 
-    const rotation = this.updateRotation(snapshot, true);
+    // A pinch already under way owns the hand: rotation is off, so it cannot steal the click.
+    const pinchEngaged = this.pinchActive || this.pinchCandidateSinceMs !== undefined;
+    const rotation = this.updateRotation(
+      pinchEngaged ? { ...snapshot, rotationEnabled: false } : snapshot,
+      true,
+    );
     const rotationBlocking = rotationBlocksHandInput(rotation.phase);
 
     const straightness = maxFingerStraightness(points, aspectY);
@@ -334,7 +339,7 @@ export class HandCursorDetector {
       y: raw.y * aspectY,
       blocked:
         !this.synced ||
-        rotation.phase !== 'IDLE' ||
+        rotationBlocking ||
         this.pinchActive ||
         this.pinchCandidateSinceMs !== undefined ||
         this.fistActive ||
@@ -374,8 +379,7 @@ export class HandCursorDetector {
           pinchRelease = true;
         }
       };
-      // Any rotation activity rearms click and back, so a flick in progress never triggers them.
-      if (rotation.phase !== 'IDLE') {
+      if (rotationBlocking) {
         this.pinchActive = false;
         this.pinchCandidateSinceMs = undefined;
         this.pinchNeedsRelease = true;

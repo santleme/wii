@@ -70,12 +70,12 @@ export interface RotationalFlickConfig {
 export type RotationalFlickOptions = Partial<RotationalFlickConfig>;
 
 export const DEFAULT_ROTATIONAL_FLICK_CONFIG: RotationalFlickConfig = {
-  candidateMs: 80,
+  candidateMs: 110,
   candidateTimeoutMs: 180,
   maxFrameGapMs: 250,
   frameAngularDeadZoneDeg: 0.05,
   velocityDeadZoneDegPerSec: 12,
-  candidateMinSpeedDegPerSec: 45,
+  candidateMinSpeedDegPerSec: 70,
   resumeSpeedDegPerSec: 40,
   recoveryEnterSpeedDegPerSec: 24,
   recoveryEnterMs: 40,
@@ -87,7 +87,7 @@ export const DEFAULT_ROTATIONAL_FLICK_CONFIG: RotationalFlickConfig = {
   sensitivity: 1,
   maxAngularVelocityDegPerSec: 360,
   openPalmMaxCurvature: 0.06,
-  cuppedMinCurvature: 0.1,
+  cuppedMinCurvature: 0.13,
   cuppedMaxCurvature: 0.55,
   smoothing: { minCutoff: 1.8, beta: 7, derivativeCutoff: 1 },
 };

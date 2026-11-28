@@ -114,12 +114,12 @@ describe('rotational flick detector — 25 deterministic scenarios', () => {
     expect(states[1]!.controlAngularVelocityDegPerSec).toBe(0);
   });
 
-  it('10 confirms ROTATING after sustained impulse inside the 64–120 ms design window', () => {
+  it('10 confirms ROTATING after sustained impulse inside the 96–128 ms design window', () => {
     const detector = new RotationalFlickDetector();
     const states = impulse(detector);
     const rotatingIndex = states.findIndex((state) => state.phase === 'ROTATING');
     expect(rotatingIndex).toBeGreaterThanOrEqual(5);
-    expect(rotatingIndex * 16).toBeLessThanOrEqual(120);
+    expect(rotatingIndex * 16).toBeLessThanOrEqual(128);
     expect(states[rotatingIndex]!.controlAngularVelocityDegPerSec).toBeGreaterThan(0);
   });
 
@@ -297,10 +297,17 @@ describe('rotational flick detector quality boundaries', () => {
   });
 
   it('accepts a slightly curled hand and brakes only on a flat palm', () => {
-    const slightlyCurled = impulse(new RotationalFlickDetector(), { curl: 0.55 });
+    const slightlyCurled = impulse(new RotationalFlickDetector(), { curl: 0.57 });
     expect(slightlyCurled.some((state) => state.phase === 'ROTATING')).toBe(true);
     expect(new RotationalFlickDetector().update(sample(0, 0, { curl: 0.4 })).handShape).toBe('open');
     expect(new RotationalFlickDetector().update(sample(0, 0, { curl: 0.45 })).handShape).toBe('neutral');
+    // A relaxed pointing hand stays out of rotation.
+    expect(new RotationalFlickDetector().update(sample(0, 0, { curl: 0.55 })).handShape).toBe('neutral');
+  });
+
+  it('does not start a candidate from the roll of a hand that is merely moving', () => {
+    const states = impulse(new RotationalFlickDetector(), { stepDeg: 1 }); // ≈62 deg/s
+    expect(states.every((state) => state.phase === 'IDLE')).toBe(true);
   });
 
   it('cancels an active rotation when tracking is lost and requires a new candidate afterwards', () => {

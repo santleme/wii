@@ -27,6 +27,9 @@ export interface HandSwipeOptions {
   maxFrameGapMs?: number;
 }
 
+/** Horizontal speed has to beat vertical by this much, so a diagonal pointer move is not a swipe. */
+const HORIZONTAL_DOMINANCE = 1.25;
+
 const STILL: HandSwipeState = { direction: 0, moving: false };
 
 /** Detects a quick sideways flick of the hand from its 2D position. */
@@ -41,12 +44,12 @@ export class HandSwipeDetector {
 
   constructor(options: HandSwipeOptions = {}) {
     this.options = {
-      // Above the peak of a quick cursor reach (about 2.25 widths/s for 0.3 width in 250ms).
-      minSpeed: 2.5,
-      minDurationMs: 50,
-      rearmSpeed: 0.5,
+      // Tuned on real camera footage at playing distance. A very quick cursor reach can pass it.
+      minSpeed: 1.55,
+      minDurationMs: 40,
+      rearmSpeed: 0.45,
       cooldownMs: 350,
-      reverseGuardMs: 700,
+      reverseGuardMs: 450,
       maxFrameGapMs: 250,
       ...options,
     };
@@ -70,7 +73,7 @@ export class HandSwipeDetector {
       this.samples = 0;
       return STILL;
     }
-    if (Math.abs(vx) < this.options.minSpeed || Math.abs(vx) <= Math.abs(vy)) {
+    if (Math.abs(vx) < this.options.minSpeed || Math.abs(vx) <= Math.abs(vy) * HORIZONTAL_DOMINANCE) {
       this.heldMs = 0;
       this.samples = 0;
       return STILL;
