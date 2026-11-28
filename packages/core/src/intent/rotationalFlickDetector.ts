@@ -50,7 +50,11 @@ export interface RotationalFlickConfig {
   reversalSpeedDegPerSec: number;
   /** Opposite motion must stay above the reversal speed for this long. Hysteresis: it is higher than resume speed. */
   reversalHoldMs: number;
-  /** Open-palm braking is immediate; the snap request is published after this short confirmation delay. */
+  /** An open palm must persist this long before ROTATING/RECOVERY becomes BRAKING. */
+  openBrakeConfirmMs: number;
+  /** Open/closed fingers must persist this long in a candidate before cancelling it as a shape change. */
+  candidateShapeCancelMs: number;
+  /** The snap request is published after this short confirmation delay once braking starts. */
   brakeSnapDelayMs: number;
   /** SNAP_TO_CARD remains visible long enough for slower camera pipelines and UI frames to observe it. */
   snapSignalMs: number;
@@ -70,24 +74,26 @@ export interface RotationalFlickConfig {
 export type RotationalFlickOptions = Partial<RotationalFlickConfig>;
 
 export const DEFAULT_ROTATIONAL_FLICK_CONFIG: RotationalFlickConfig = {
-  candidateMs: 100,
-  candidateTimeoutMs: 180,
-  maxFrameGapMs: 120,
+  candidateMs: 110,
+  candidateTimeoutMs: 240,
+  maxFrameGapMs: 250,
   frameAngularDeadZoneDeg: 0.05,
   velocityDeadZoneDegPerSec: 12,
-  candidateMinSpeedDegPerSec: 55,
+  candidateMinSpeedDegPerSec: 70,
   resumeSpeedDegPerSec: 40,
   recoveryEnterSpeedDegPerSec: 24,
   recoveryEnterMs: 40,
   recoveryTimeoutMs: 260,
   reversalSpeedDegPerSec: 95,
   reversalHoldMs: 60,
+  openBrakeConfirmMs: 70,
+  candidateShapeCancelMs: 70,
   brakeSnapDelayMs: 65,
   snapSignalMs: 300,
   sensitivity: 1,
   maxAngularVelocityDegPerSec: 360,
-  openPalmMaxCurvature: 0.08,
-  cuppedMinCurvature: 0.15,
+  openPalmMaxCurvature: 0.06,
+  cuppedMinCurvature: 0.13,
   cuppedMaxCurvature: 0.55,
   smoothing: { minCutoff: 1.8, beta: 7, derivativeCutoff: 1 },
 };
@@ -130,6 +136,10 @@ const FINGER_CHAINS = [
   [WRIST, 17, 18, 19, 20],
 ] as const;
 const MIN_LENGTH = 1e-8;
+/** Roll around the palm normal is trusted when it dominates the frame-to-frame rotation vector. */
+const PALM_ROLL_MIN_ALIGNMENT = 0.6;
+/** Camera z must corroborate palm-normal roll, so pure yaw/pitch wobble is not amplified as twist. */
+const CAMERA_ROLL_MIN_SHARE = 0.25;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -279,6 +289,8 @@ function validateConfig(config: RotationalFlickConfig): void {
     config.recoveryTimeoutMs,
     config.reversalSpeedDegPerSec,
     config.reversalHoldMs,
+    config.openBrakeConfirmMs,
+    config.candidateShapeCancelMs,
     config.brakeSnapDelayMs,
     config.snapSignalMs,
     config.maxAngularVelocityDegPerSec,
@@ -320,6 +332,8 @@ export class RotationalFlickDetector {
   private strongCandidateMs = 0;
   private lowSpeedSinceMs?: number;
   private reversalSinceMs?: number;
+  private openShapeSinceMs?: number;
+  private invalidCandidateShapeSinceMs?: number;
   private frameRejection?: RotationalFlickRejection;
 
   constructor(options: RotationalFlickOptions = {}) {
@@ -404,6 +418,8 @@ export class RotationalFlickDetector {
     this.strongCandidateMs = 0;
     this.lowSpeedSinceMs = undefined;
     this.reversalSinceMs = undefined;
+    this.openShapeSinceMs = undefined;
+    this.invalidCandidateShapeSinceMs = undefined;
     this.frameRejection = undefined;
     this.velocityFilter.reset();
   }
@@ -413,12 +429,32 @@ export class RotationalFlickDetector {
     const rotation = relativeRotationVector(current, this.previousBasis);
     const angleDeg = (length(rotation) * 180) / Math.PI;
     if (angleDeg < this.config.frameAngularDeadZoneDeg) return 0;
-    const radiansPerSecond = rotation.z / (dtMs / 1000);
+    const radians = this.rollRadians(rotation, this.previousBasis);
+    const radiansPerSecond = radians / (dtMs / 1000);
     return clamp(
       (radiansPerSecond * 180) / Math.PI,
       -this.config.maxAngularVelocityDegPerSec,
       this.config.maxAngularVelocityDegPerSec,
     );
+  }
+
+  /**
+   * Camera z is the conservative roll measurement. When the same rotation is dominantly about
+   * the palm normal and camera z corroborates its direction, use the palm-normal projection so a
+   * naturally tilted hand is not under-measured; pure yaw/pitch stays on the camera-z channel.
+   */
+  private rollRadians(rotation: Vector3, previousBasis: PalmBasis): number {
+    const cameraRoll = rotation.z;
+    const palmRoll = dot(rotation, previousBasis.zAxis);
+    const magnitude = length(rotation);
+    if (magnitude <= MIN_LENGTH) return cameraRoll;
+    const palmAlignment = Math.abs(palmRoll) / magnitude;
+    const cameraShare = Math.abs(cameraRoll) / Math.max(Math.abs(palmRoll), MIN_LENGTH);
+    const consistent = Math.sign(cameraRoll) === Math.sign(palmRoll) && cameraShare >= CAMERA_ROLL_MIN_SHARE;
+    if (palmAlignment >= PALM_ROLL_MIN_ALIGNMENT && consistent && Math.abs(palmRoll) > Math.abs(cameraRoll)) {
+      return palmRoll;
+    }
+    return cameraRoll;
   }
 
   private shape(curvature: number | undefined): RotationalHandShape {
@@ -453,23 +489,38 @@ export class RotationalFlickDetector {
       return 0;
     }
 
-    if (handShape === 'open' && (this.phase === 'ROTATING' || this.phase === 'RECOVERY')) {
-      this.enter('BRAKING', timestampMs);
-      return 0;
+    if (this.phase === 'ROTATING' || this.phase === 'RECOVERY') {
+      if (handShape === 'open') {
+        this.openShapeSinceMs ??= timestampMs;
+        if (timestampMs - this.openShapeSinceMs >= this.config.openBrakeConfirmMs) {
+          this.enter('BRAKING', timestampMs);
+          return 0;
+        }
+      } else {
+        this.openShapeSinceMs = undefined;
+      }
     }
 
     if (this.phase === 'ROTATION_CANDIDATE') {
-      if (handShape === 'open' || handShape === 'closed') return this.cancel('hand-shape', timestampMs);
-      const oppositeImpulse =
-        this.candidateDirection !== 0 && moveDirection === -this.candidateDirection && speed >= this.config.reversalSpeedDegPerSec;
-      if (oppositeImpulse) return this.cancel('direction-reversed', timestampMs);
-      if (moveDirection === this.candidateDirection && speed >= this.config.candidateMinSpeedDegPerSec) {
-        this.strongCandidateMs += dtMs ?? 0;
-      }
-      if (this.strongCandidateMs >= this.config.candidateMs) {
-        this.committedDirection = this.candidateDirection;
-        this.enter('ROTATING', timestampMs);
-        return velocityDegPerSec;
+      const invalidShape = handShape === 'open' || handShape === 'closed';
+      if (invalidShape) {
+        this.invalidCandidateShapeSinceMs ??= timestampMs;
+        if (timestampMs - this.invalidCandidateShapeSinceMs >= this.config.candidateShapeCancelMs) {
+          return this.cancel('hand-shape', timestampMs);
+        }
+      } else {
+        this.invalidCandidateShapeSinceMs = undefined;
+        const oppositeImpulse =
+          this.candidateDirection !== 0 && moveDirection === -this.candidateDirection && speed >= this.config.reversalSpeedDegPerSec;
+        if (oppositeImpulse) return this.cancel('direction-reversed', timestampMs);
+        if (moveDirection === this.candidateDirection && speed >= this.config.candidateMinSpeedDegPerSec) {
+          this.strongCandidateMs += dtMs ?? 0;
+        }
+        if (this.strongCandidateMs >= this.config.candidateMs) {
+          this.committedDirection = this.candidateDirection;
+          this.enter('ROTATING', timestampMs);
+          return velocityDegPerSec;
+        }
       }
       if (timestampMs - (this.phaseSinceMs ?? timestampMs) > this.config.candidateTimeoutMs) {
         return this.cancel('candidate-timeout', timestampMs);
@@ -531,9 +582,11 @@ export class RotationalFlickDetector {
       this.phase = 'ROTATION_CANDIDATE';
       this.phaseSinceMs = timestampMs;
       this.candidateDirection = moveDirection;
-      this.strongCandidateMs = dtMs;
+      // A slow frame must not fill the window by itself: a second strong sample is always needed.
+      this.strongCandidateMs = Math.min(dtMs, this.config.candidateMs / 2);
       this.lowSpeedSinceMs = undefined;
       this.reversalSinceMs = undefined;
+      this.invalidCandidateShapeSinceMs = undefined;
     }
     return 0;
   }
@@ -541,7 +594,11 @@ export class RotationalFlickDetector {
   private enter(phase: RotationalFlickPhase, timestampMs: number): void {
     this.phase = phase;
     this.phaseSinceMs = timestampMs;
-    if (phase !== 'ROTATION_CANDIDATE') this.strongCandidateMs = 0;
+    if (phase !== 'ROTATION_CANDIDATE') {
+      this.strongCandidateMs = 0;
+      this.invalidCandidateShapeSinceMs = undefined;
+    }
+    if (phase !== 'ROTATING' && phase !== 'RECOVERY') this.openShapeSinceMs = undefined;
     if (phase !== 'ROTATING') this.lowSpeedSinceMs = undefined;
   }
 
@@ -569,6 +626,8 @@ export class RotationalFlickDetector {
     this.strongCandidateMs = 0;
     this.lowSpeedSinceMs = undefined;
     this.reversalSinceMs = undefined;
+    this.openShapeSinceMs = undefined;
+    this.invalidCandidateShapeSinceMs = undefined;
     this.velocityFilter.reset();
     this.previousBasis = basis;
     this.previousTimestampMs = Number.isFinite(timestampMs) && timestampMs >= 0 ? timestampMs : undefined;

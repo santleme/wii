@@ -2,7 +2,7 @@ import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, use
 import { GOALS, type Goal } from '../games/athletics/race';
 import type { Sport } from './GameCanvas';
 import { CarouselController, type CarouselStepResult } from './carouselController';
-import type { HandCursorInput } from './handCursorTypes';
+import type { HandInputStore } from './handInputStore';
 
 const SPORTS: { id: Sport; name: string; hint: string }[] = [
   { id: 'athletics', name: 'Atletismo', hint: 'Corra no lugar e dispute a prova no estádio' },
@@ -24,7 +24,7 @@ interface HomeMenuProps {
   onPick: (sport: Sport, goal?: Goal) => void;
   onIronMan: () => void;
   exit: ReactNode;
-  handInputRef: SharedRef<HandCursorInput>;
+  handStore: HandInputStore;
   rotationGateRef: SharedRef<boolean>;
   backRef?: SharedRef<(() => void) | undefined>;
   carouselDebugRef?: SharedRef<CarouselStepResult | undefined>;
@@ -84,7 +84,7 @@ function Clock() {
   </div>;
 }
 
-export function HomeMenu({ onPick, onIronMan, exit, handInputRef, rotationGateRef, carouselDebugRef, backRef }: HomeMenuProps) {
+export function HomeMenu({ onPick, onIronMan, exit, handStore, rotationGateRef, carouselDebugRef, backRef }: HomeMenuProps) {
   const reducedMotion = usePrefersReducedMotion();
   const [choosingGoal, setChoosingGoal] = useState(false);
   const [ring, setRing] = useState(() => introduced || reducedMotion);
@@ -101,8 +101,6 @@ export function HomeMenu({ onPick, onIronMan, exit, handInputRef, rotationGateRe
   const controllerRef = useRef<CarouselController | null>(null);
   controllerRef.current ??= new CarouselController({ slotCount: SLOTS.length, reducedMotion });
   const controller = controllerRef.current;
-  // A câmera desligada/sem mão sincronizada estaciona o loop: mouse e CSS continuam independentes dele.
-  const handRotationAvailable = handInputRef.current.visible && handInputRef.current.synced;
 
   useEffect(() => {
     controller.setReducedMotion(reducedMotion);
@@ -129,7 +127,9 @@ export function HomeMenu({ onPick, onIronMan, exit, handInputRef, rotationGateRe
   }, []);
 
   useEffect(() => {
-    if (!ring || !ringReady || choosingGoal || !handRotationAvailable) return;
+    // O loop vive com a roda pronta, com ou sem mão: ele lê a amostra a cada frame, então uma
+    // perda curta não o remonta, e com a mão ociosa mouse e CSS seguem independentes.
+    if (!ring || !ringReady || choosingGoal) return;
     const ringElement = ringRef.current;
     if (!ringElement) return;
     let rafId: number | undefined;
@@ -139,7 +139,7 @@ export function HomeMenu({ onPick, onIronMan, exit, handInputRef, rotationGateRe
     const tick = (now: number) => {
       const dtMs = lastMs === undefined ? 0 : now - lastMs;
       lastMs = now;
-      const input = handInputRef.current;
+      const input = handStore.current;
       const inputFresh = input.capturedAtMs !== undefined && now - input.capturedAtMs <= HAND_SAMPLE_STALE_MS;
       const mouseOwningTransition = now < mouseControlUntilMsRef.current;
       const rotationInteractive = rotationGateRef.current && input.visible && input.synced && inputFresh && !mouseOwningTransition;
@@ -164,7 +164,7 @@ export function HomeMenu({ onPick, onIronMan, exit, handInputRef, rotationGateRe
       ringElement.classList.remove('is-gesture-controlled');
       if (carouselDebugRef) carouselDebugRef.current = undefined;
     };
-  }, [ring, ringReady, choosingGoal, handRotationAvailable, controller, paintTurn, handInputRef, rotationGateRef, carouselDebugRef]);
+  }, [ring, ringReady, choosingGoal, controller, paintTurn, handStore, rotationGateRef, carouselDebugRef]);
 
   useEffect(() => {
     if (choosingGoal) return;
@@ -182,13 +182,28 @@ export function HomeMenu({ onPick, onIronMan, exit, handInputRef, rotationGateRe
     return () => window.clearTimeout(timer);
   }, [ring, ringReady, reducedMotion]);
 
-  const rotateTo = (nextTurn: number) => {
+  const rotateTo = useCallback((nextTurn: number) => {
     mouseControlUntilMsRef.current = reducedMotion ? 0 : performance.now() + RING_TRANSITION_MS;
     ringRef.current?.classList.remove('is-gesture-controlled');
     controller.syncTurn(nextTurn);
     setTurn(nextTurn);
-  };
-  const rotateBy = (delta: number) => rotateTo(Math.round(controller.currentTurn) + delta);
+    // A gesture may have painted past React's last render, which alone would then skip the write.
+    paintTurn(nextTurn);
+  }, [controller, paintTurn, reducedMotion]);
+  const rotateBy = useCallback(
+    (delta: number) => rotateTo(Math.round(controller.currentTurn) + delta),
+    [controller, rotateTo],
+  );
+  // A swipe is a one-sample pulse, so it is taken as published, not polled from the loop.
+  useEffect(
+    () =>
+      handStore.subscribe(() => {
+        const input = handStore.current;
+        if (input.swipeDirection === 0 || !rotationGateRef.current || !input.visible || !input.synced) return;
+        rotateBy(input.swipeDirection);
+      }),
+    [handStore, rotationGateRef, rotateBy],
+  );
   // Como nos papers: clicar num canal gira a roda, pelo caminho curto, até ele chegar à frente.
   const bring = (index: number) => {
     setRing(true);

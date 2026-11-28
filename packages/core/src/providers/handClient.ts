@@ -11,6 +11,22 @@ export interface HandClientAssets {
   modelUrl: string;
 }
 
+/** Widest video sent as is on the GPU delegate; wider video is downscaled on the bitmap path. */
+const GPU_FRAME_WIDTH = 640;
+/** CPU inference reads the pixels back, so a quarter of them is worth the resize. */
+const CPU_FRAME_WIDTH = 320;
+
+/** Undefined when the video needs downscaling or VideoFrame cannot be built from it. */
+function directFrame(video: HTMLVideoElement, timestampMs: number, maxWidth: number): VideoFrame | undefined {
+  if (typeof VideoFrame === 'undefined' || video.videoWidth > maxWidth) return undefined;
+  try {
+    // VideoFrame timestamps are integer microseconds.
+    return new VideoFrame(video, { timestamp: Math.round(timestampMs * 1000) });
+  } catch {
+    return undefined;
+  }
+}
+
 interface PendingFrame {
   requestId: number;
   resolve(snapshot: HandSnapshot | undefined): void;
@@ -53,9 +69,12 @@ export class HandClient {
       onFrame: async (timestampMs) => {
         if (this.captureSession !== session || !this.ready || video.videoWidth <= 0 || video.videoHeight <= 0) return;
         const aspectY = video.videoHeight / video.videoWidth;
-        let bitmap: ImageBitmap | undefined;
+        const maxWidth = this.activeDelegate === 'CPU' ? CPU_FRAME_WIDTH : GPU_FRAME_WIDTH;
+        let bitmap: ImageBitmap | VideoFrame | undefined;
         try {
-          bitmap = await createImageBitmap(video, { resizeWidth: 640, resizeQuality: 'low' });
+          // Synchronous when possible: no await means no session change can slip in before the post.
+          bitmap = directFrame(video, timestampMs, maxWidth);
+          bitmap ??= await createImageBitmap(video, { resizeWidth: maxWidth, resizeQuality: 'low' });
           if (this.captureSession !== session || !this.ready) return;
           const frame = bitmap;
           bitmap = undefined;
@@ -155,7 +174,7 @@ export class HandClient {
    * Processes at most one frame at a time. The bitmap is transferred and closed by the worker when
    * accepted; otherwise it is closed here. Busy frames are dropped instead of queued.
    */
-  processFrame(bitmap: ImageBitmap, timestampMs: number): Promise<HandSnapshot | undefined> {
+  processFrame(bitmap: ImageBitmap | VideoFrame, timestampMs: number): Promise<HandSnapshot | undefined> {
     if (!Number.isFinite(timestampMs) || timestampMs < 0) {
       bitmap.close();
       return Promise.reject(new RangeError('Frame timestamp must be a finite, non-negative number.'));

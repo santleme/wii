@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CarouselStepResult } from '../src/ui/carouselController';
 import { HAND_IDLE, type HandCursorInput } from '../src/ui/handCursorTypes';
+import { createHandInputStore } from '../src/ui/handInputStore';
 import { HomeMenu } from '../src/ui/WiiMenu';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -44,7 +45,7 @@ function renderHome(input: HandCursorInput, onPick = vi.fn(), onIronMan = vi.fn(
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  const handInputRef = { current: input };
+  const handStore = createHandInputStore(input);
   const rotationGateRef = { current: false };
   const carouselDebugRef: { current: CarouselStepResult | undefined } = { current: undefined };
   act(() => {
@@ -52,12 +53,12 @@ function renderHome(input: HandCursorInput, onPick = vi.fn(), onIronMan = vi.fn(
       onPick,
       onIronMan,
       exit: null,
-      handInputRef,
+      handStore,
       rotationGateRef,
       carouselDebugRef,
     }));
   });
-  return { container, root, handInputRef, rotationGateRef, carouselDebugRef };
+  return { container, root, handStore, rotationGateRef, carouselDebugRef };
 }
 
 describe('HomeMenu rotational carousel integration', () => {
@@ -157,26 +158,54 @@ describe('HomeMenu rotational carousel integration', () => {
     });
   });
 
-  it('cancels the carousel rAF when camera hand input becomes unavailable', () => {
+  it('keeps one loop through a momentary hand loss and drives again without a re-render', () => {
     mockReducedMotion();
     const raf = mockRaf();
-    const input: HandCursorInput = { ...HAND_IDLE, visible: true, synced: true };
-    const rendered = renderHome(input);
-    expect(raf.callbacks.size).toBe(1);
-    rendered.handInputRef.current = HAND_IDLE;
+    const { container, root, handStore } = renderHome(HAND_IDLE);
+    const firstChannel = container.querySelector<HTMLElement>('.channel')!;
     act(() => {
-      rendered.root.render(createElement(HomeMenu, {
-        onPick: vi.fn(),
-        onIronMan: vi.fn(),
-        exit: null,
-        handInputRef: rendered.handInputRef,
-        rotationGateRef: rendered.rotationGateRef,
-        carouselDebugRef: rendered.carouselDebugRef,
-      }));
+      raf.fire(1000);
     });
-    expect(raf.callbacks.size).toBe(0);
+    expect(firstChannel.style.left).toBe('50%');
+    expect(raf.callbacks.size).toBe(1);
+
+    handStore.publish({
+      ...HAND_IDLE,
+      visible: true,
+      synced: true,
+      capturedAtMs: 1000,
+      rotationPhase: 'ROTATING',
+      rotationAngularVelocity: 180,
+      rotationDirection: 1,
+    });
     act(() => {
-      rendered.root.unmount();
+      raf.fire(1016);
+      raf.fire(1032);
+    });
+    expect(firstChannel.style.left).not.toBe('50%');
+    expect(raf.callbacks.size).toBe(1);
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('steps one channel per swipe pulse, only from a synchronized hand', () => {
+    mockReducedMotion();
+    mockRaf();
+    const { container, root, handStore } = renderHome(HAND_IDLE);
+    const athletics = container.querySelector<HTMLElement>('[aria-label="Atletismo"]')!;
+    const tracked: HandCursorInput = { ...HAND_IDLE, visible: true, synced: true };
+    const side = athletics.style.left;
+
+    act(() => handStore.publish({ ...tracked, synced: false, swipeDirection: 1 }));
+    expect(athletics.style.left).toBe(side);
+    act(() => handStore.publish({ ...tracked, swipeDirection: 1 }));
+    expect(athletics.style.left).toBe('50%');
+    act(() => handStore.publish(tracked));
+    act(() => handStore.publish({ ...tracked, swipeDirection: -1 }));
+    expect(athletics.style.left).toBe(side);
+    act(() => {
+      root.unmount();
     });
   });
 

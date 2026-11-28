@@ -21,7 +21,8 @@ import type { Goal } from './games/athletics/race';
 import { HandCursor } from './ui/HandCursor';
 import { HandDebugOverlay } from './ui/HandDebugOverlay';
 import { PerfMeter } from './ui/PerfMeter';
-import { HAND_IDLE, type HandCursorInput } from './ui/handCursorTypes';
+import { HAND_IDLE } from './ui/handCursorTypes';
+import { createHandInputStore } from './ui/handInputStore';
 import type { CarouselStepResult } from './ui/carouselController';
 import { drawPose } from './ui/PoseOverlay';
 import { EXIT_DODGE_SW } from './kinematics/postureSignals';
@@ -69,8 +70,8 @@ export default function App({ exit }: { exit?: ReactNode }) {
   const [cameraStatus, setCameraStatus] = useState('Permissão da câmera ainda não solicitada');
   const [tracking, setTracking] = useState('SEM POSE');
   const [muted, setMuted] = useState(readMutedPreference);
-  const [handInput, setHandInput] = useState(HAND_IDLE);
-  const handInputRef = useRef<HandCursorInput>(HAND_IDLE);
+  // Hand samples stay out of React state, so the camera rate never re-renders App.
+  const [handStore] = useState(createHandInputStore);
   const homeRotationGateRef = useRef(false);
   const carouselDebugRef = useRef<CarouselStepResult | undefined>(undefined);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -83,6 +84,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
   const contextRef = useRef(new ContextClassifier());
   const calibratorRef = useRef(new AdaptiveCalibrator());
   const handDetectorRef = useRef(new HandCursorDetector());
+  const lastHandDeliveryAtRef = useRef<number | undefined>(undefined);
   const sportRef = useRef(sport);
   sportRef.current = sport;
   const screenRef = useRef(screen);
@@ -107,18 +109,16 @@ export default function App({ exit }: { exit?: ReactNode }) {
   const recorderRef = useRef<PoseRecorder | undefined>(undefined);
   const [recordingPrompt, setRecordingPrompt] = useState<string>();
 
-  const publishHandInput = useCallback((next: HandCursorInput) => {
-    handInputRef.current = next;
-    setHandInput(next);
-  }, []);
-
   useEffect(() => {
     audioRef.current.setMuted(muted);
   }, [muted]);
 
   useEffect(() => {
     void navigator.permissions?.query({ name: 'camera' as PermissionName }).then((permission) => {
-      if (permission.state === 'granted') PoseClient.warmVisionAssets();
+      if (permission.state !== 'granted') return;
+      // The app opens on the hand-driven menu; both models share the same WASM.
+      HandClient.warmVisionAssets();
+      PoseClient.warmVisionAssets();
     }).catch(() => undefined);
     return () => {
       cameraAttemptRef.current += 1;
@@ -166,8 +166,9 @@ export default function App({ exit }: { exit?: ReactNode }) {
     setTracking('SEM POSE');
     engineRef.current?.setTracking?.('SEM POSE');
     setCameraStatus('Câmera desligada');
-    publishHandInput(HAND_IDLE);
+    handStore.publish(HAND_IDLE);
     handDetectorRef.current.reset();
+    lastHandDeliveryAtRef.current = undefined;
     for (const event of pipelineRef.current.reset(performance.now())) dispatchEvent(event);
     engineRef.current?.resetLaneZone?.();
     engineRef.current?.setGuard?.(undefined, null);
@@ -178,7 +179,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
     contextRef.current.reset();
     resetCalibration();
     drawPose(overlayRef.current, videoRef.current);
-  }, [dispatchEvent, publishHandInput, resetCalibration]);
+  }, [dispatchEvent, handStore, resetCalibration]);
 
   const finishRecording = useCallback(() => {
     const recorder = recorderRef.current;
@@ -323,25 +324,38 @@ export default function App({ exit }: { exit?: ReactNode }) {
     if (stale() || !handClient.isReady || !streamRef.current || activeVisionModeRef.current !== 'hand') return;
     handClient.beginCapture(video, (snapshot, aspectY) => {
       if (stale()) return;
+      const deliveredAtMs = performance.now();
+      const previousDeliveryAtMs = lastHandDeliveryAtRef.current;
+      lastHandDeliveryAtRef.current = deliveredAtMs;
+      const handInferenceMs = Math.max(0, deliveredAtMs - snapshot.timestampMs);
+      const workerFps =
+        previousDeliveryAtMs === undefined ? undefined : 1000 / Math.max(deliveredAtMs - previousDeliveryAtMs, 0.01);
       const primary = snapshot.hands[0];
       const state = handDetectorRef.current.update({
         timestampMs: snapshot.timestampMs,
         landmarks: primary?.landmarks ?? [],
         worldLandmarks: primary?.worldLandmarks,
         handedness: primary?.handedness,
-        handednessScore: primary?.handednessScore,
         aspectY,
         rotationEnabled: screenRef.current === 'home' && homeRotationGateRef.current,
+        handInferenceMs,
+        workerFps,
       });
-      publishHandInput({
+      handStore.publish({
         visible: state.visible,
         x: state.x * window.innerWidth,
         y: state.y * window.innerHeight,
         syncProgress: state.syncProgress,
         synced: state.synced,
         pinching: state.pinching,
+        pinchState: state.pinchState,
+        freezeReason: state.freezeReason,
         pinchRelease: state.pinchRelease,
         backProgress: state.backProgress,
+        swipeDirection: state.swipeDirection,
+        swipeMoving: state.swipeMoving,
+        handInferenceMs: state.handInferenceMs,
+        workerFps: state.workerFps,
         capturedAtMs: snapshot.timestampMs,
         rotationPhase: state.rotationPhase,
         rotationAngularVelocity: state.rotationAngularVelocity,
@@ -357,7 +371,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
     }, (error) => {
       if (!stale()) setCameraStatus(error.message);
     });
-  }, [isCurrentVisionActivation, publishHandInput, stopCamera]);
+  }, [isCurrentVisionActivation, handStore, stopCamera]);
 
   const startPoseCapture = useCallback(async (video: HTMLVideoElement, attempt: number, activation: number) => {
     const stale = () => !isCurrentVisionActivation(attempt, activation, 'pose');
@@ -392,7 +406,8 @@ export default function App({ exit }: { exit?: ReactNode }) {
     const previous = activateVisionMode(next);
     if (previous !== undefined) {
       handDetectorRef.current.reset();
-      publishHandInput(HAND_IDLE);
+      lastHandDeliveryAtRef.current = undefined;
+      handStore.publish(HAND_IDLE);
       if (next === 'hand') {
         poseClientRef.current?.pauseCapture();
         drawPose(overlayRef.current, videoRef.current);
@@ -421,7 +436,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
         failVisionActivation(attempt, activation, 'pose', error, 'Não foi possível iniciar o modo de pose.');
       });
     }
-  }, [screen, cameraOn, activateVisionMode, failVisionActivation, startHandCapture, startPoseCapture, publishHandInput]);
+  }, [screen, cameraOn, activateVisionMode, failVisionActivation, startHandCapture, startPoseCapture, handStore]);
 
   const startCamera = useCallback(async () => {
     stopCamera();
@@ -546,7 +561,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
         onPick={(next, distance) => { setIronResults(null); play(next, distance); }}
         onIronMan={startIronMan}
         backRef={menuBackRef}
-        handInputRef={handInputRef}
+        handStore={handStore}
         rotationGateRef={homeRotationGateRef}
         carouselDebugRef={carouselDebugRef}
       />
@@ -574,8 +589,8 @@ export default function App({ exit }: { exit?: ReactNode }) {
       <button type="button" className="dock-btn round" onClick={toggleMute} title={muted ? 'Áudio desligado' : 'Áudio ligado'}>{muted ? '×' : '♫'}</button>
     </div>}
 
-    <HandCursor input={handInput} active={menu && cameraOn} onBack={handBack} />
-    {menu && cameraOn && <HandDebugOverlay input={handInput} carouselRef={carouselDebugRef} />}
+    <HandCursor store={handStore} active={menu && cameraOn} onBack={handBack} />
+    {menu && cameraOn && <HandDebugOverlay store={handStore} carouselRef={carouselDebugRef} />}
 
     <CameraPip
       videoRef={videoRef} canvasRef={overlayRef} cameraOn={cameraOn} status={cameraStatus} tracking={tracking}

@@ -11,19 +11,23 @@ import {
   type RotationalFlickState,
   type RotationalHandShape,
 } from '@wii/spatial-core';
+import { HandSwipeDetector } from './handSwipe';
 import { clamp } from './math';
 
 export interface MenuHandSnapshot {
   timestampMs: number;
   landmarks: readonly Point3[];
   handedness?: Hand | 'Left' | 'Right';
-  handednessScore?: number;
   /** bitmap.height / bitmap.width; corrige distâncias normalizadas fora do quadrado. */
   aspectY?: number;
   /** Métricas 3D da mão no espaço da câmera, necessárias apenas para o flick rotacional. */
   worldLandmarks?: readonly Point3[];
   /** O gesto rotacional só é alimentado quando a HomeMenu expõe a roda interativa. */
   rotationEnabled?: boolean;
+  /** Diagnóstico de captura→entrega calculado por quem publica a amostra, em ms. */
+  handInferenceMs?: number;
+  /** Diagnóstico da taxa efetiva de entregas do worker, calculado por quem publica a amostra. */
+  workerFps?: number;
 }
 
 export interface HandCursorZone {
@@ -60,9 +64,19 @@ export interface HandCursorState {
   syncProgress: number;
   synced: boolean;
   pinching: boolean;
+  /** Estado interno da pinça, para diagnosticar a espera de confirmação sem expor contadores. */
+  pinchState: 'idle' | 'candidate' | 'active';
+  /** Motivo do cursor estar congelado nesta amostra; ausente quando ele acompanha a mão. */
+  freezeReason?: 'pinch' | 'fist' | 'rotation';
   /** Pulso de clique confirmado na ativação da pinça; não indica a soltura física dos dedos. */
   pinchRelease: boolean;
   backProgress: number;
+  /** A mão está em deslocamento lateral rápido, antes ou durante um pulso de swipe. */
+  swipeMoving: boolean;
+  /** Diagnóstico de captura→entrega repassado da amostra de entrada. */
+  handInferenceMs?: number;
+  /** Diagnóstico da taxa efetiva de entregas repassado da amostra de entrada. */
+  workerFps?: number;
   activeZone: HandCursorZone;
   rotationPhase: RotationalFlickPhase;
   /** Velocidade sanitizada que o carrossel pode consumir, em deg/s. */
@@ -71,6 +85,8 @@ export interface HandCursorState {
   rotationFilteredAngularVelocity: number;
   rotationRawAngularVelocity: number;
   rotationDirection: -1 | 0 | 1;
+  /** Pulso de uma amostra: passo da roda pedido por um aceno lateral. */
+  swipeDirection: -1 | 0 | 1;
   rotationCurvature: number;
   rotationHandShape: RotationalHandShape;
   rotationRejectReason?: RotationalFlickRejection;
@@ -92,14 +108,26 @@ const FINGERS = [
   [17, 18, 19, 20],
 ] as const;
 const DEFAULT_ZONE: HandCursorZone = { minX: 0, maxX: 1, minY: 0, maxY: 1 };
-const DEFAULT_HAND_SMOOTHING: OneEuroOptions = { minCutoff: 1.0, beta: 5.0, derivativeCutoff: 1.0 };
+/** Light on purpose: MediaPipe's VIDEO mode already smooths the landmarks. */
+const DEFAULT_HAND_SMOOTHING: OneEuroOptions = { minCutoff: 2.2, beta: 2.0, derivativeCutoff: 1.0 };
 const SCALE_MIN = 0.1;
 const SCALE_MAX = 0.3;
-const MAX_MARGIN = 0.37;
-const SCALE_TAU_MS = 250;
+const MAX_MARGIN = 0.27;
+const SCALE_TAU_MS = 1200;
+/** Smaller scale changes leave the active zone alone, so tilting the palm does not move the cursor. */
+const SCALE_DEADBAND = 0.015;
+/** Shorter observation gaps keep the pointer filters and hand scale: late inference, not a new hand. */
+const FILTER_RESET_GAP_MS = 500;
 
-function rotationBlocksGestures(phase: RotationalFlickPhase): boolean {
-  return phase !== 'IDLE';
+/** A sync survives missing frames this short: they neither hide the cursor nor stop its count. */
+const PRESENCE_GAP_MS = 150;
+
+/**
+ * True once a rotation is committed: the cursor freezes and hover, click, back and swipe are
+ * suspended. A mere candidate or a cancelled one takes nothing away from the hand.
+ */
+export function rotationBlocksHandInput(phase: RotationalFlickPhase): boolean {
+  return phase !== 'IDLE' && phase !== 'ROTATION_CANDIDATE' && phase !== 'CANCELLED';
 }
 
 function finite(point: Point3 | undefined): point is Point3 {
@@ -177,6 +205,7 @@ export class HandCursorDetector {
   private activeZone: HandCursorZone;
   private readonly fixedZone: boolean;
   private smoothedScale?: number;
+  private zoneScale?: number;
   private readonly syncDurationMs: number;
   private readonly maxFrameGapMs: number;
   private readonly lossGraceMs: number;
@@ -191,6 +220,7 @@ export class HandCursorDetector {
   private readonly pinchCooldownMs: number;
   private readonly pinchPressMs: number;
   private readonly rotationDetector: RotationalFlickDetector;
+  private readonly swipeDetector = new HandSwipeDetector();
   private pinchActive = false;
   private pinchCandidateSinceMs?: number;
   private presenceMs = 0;
@@ -214,7 +244,7 @@ export class HandCursorDetector {
     this.fixedZone = options.activeZone !== undefined;
     this.syncDurationMs = options.syncDurationMs ?? 200;
     this.maxFrameGapMs = options.maxFrameGapMs ?? 250;
-    this.lossGraceMs = options.lossGraceMs ?? 300;
+    this.lossGraceMs = options.lossGraceMs ?? 650;
     this.pointerAnchor = options.pointerAnchor ?? 'middleMcp';
     this.backHoldMs = options.backHoldMs ?? 500;
     this.fistEnterStraightness = options.fistEnterStraightness ?? 0.65;
@@ -235,8 +265,9 @@ export class HandCursorDetector {
 
   update(snapshot: MenuHandSnapshot): HandCursorState {
     const aspectY = snapshot.aspectY ?? 1;
-    const lowConfidence = snapshot.handednessScore !== undefined && snapshot.handednessScore < 0.75;
-    if (lowConfidence || !usableHand(snapshot.landmarks, aspectY)) return this.missing(snapshot);
+    // The handedness score is not a landmark confidence (it drops as the hand turns or closes),
+    // so geometry alone decides whether the hand is usable.
+    if (!usableHand(snapshot.landmarks, aspectY)) return this.missing(snapshot);
 
     const points = snapshot.landmarks;
     const timestampMs = snapshot.timestampMs;
@@ -248,13 +279,17 @@ export class HandCursorDetector {
     const raw = this.pointer(points);
     const gap = this.lastTimestampMs === undefined ? 0 : timestampMs - this.lastTimestampMs;
     const absenceMs = this.missingSinceMs === undefined ? 0 : timestampMs - this.missingSinceMs;
-    const countedPresenceGap = absenceMs > 150 ? 0 : gap;
+    const countedPresenceGap = absenceMs > PRESENCE_GAP_MS ? 0 : gap;
     const brokenTimeline = this.lastTimestampMs !== undefined && (gap < 0 || gap > this.maxFrameGapMs);
-    if (brokenTimeline) {
+    if (gap < 0 || gap > Math.max(FILTER_RESET_GAP_MS, this.maxFrameGapMs)) {
       this.xFilter.reset();
       this.yFilter.reset();
-      if (gap < 0) this.presenceMs = 0;
       this.smoothedScale = undefined;
+    }
+    // Held gestures rearm much sooner than the filters reset: unobserved time must never
+    // complete a click or a back gesture.
+    if (brokenTimeline) {
+      if (gap < 0) this.presenceMs = 0;
       this.lastFreePosition = undefined;
       this.pinchActive = false;
       this.pinchCandidateSinceMs = undefined;
@@ -278,12 +313,16 @@ export class HandCursorDetector {
         imageDistance(points[WRIST]!, points[MIDDLE_MCP]!, aspectY),
         imageDistance(points[INDEX_MCP]!, points[PINKY_MCP]!, aspectY),
       );
-      if (this.smoothedScale === undefined) this.smoothedScale = rawScale;
-      else {
+      if (this.smoothedScale === undefined) {
+        this.smoothedScale = rawScale;
+        this.zoneScale = rawScale;
+      } else {
         const alpha = 1 - Math.exp(-Math.max(gap, 0) / SCALE_TAU_MS);
         this.smoothedScale += alpha * (rawScale - this.smoothedScale);
       }
-      const margin = clamp((this.smoothedScale - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * MAX_MARGIN;
+      if (this.zoneScale === undefined || Math.abs(this.smoothedScale - this.zoneScale) > SCALE_DEADBAND)
+        this.zoneScale = this.smoothedScale;
+      const margin = clamp((this.zoneScale - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)) * MAX_MARGIN;
       this.activeZone = { minX: margin, maxX: 1 - margin, minY: margin, maxY: 1 - margin };
     }
 
@@ -291,8 +330,14 @@ export class HandCursorDetector {
     const smoothX = this.xFilter.filter(mapped.x, timestampMs);
     const smoothY = this.yFilter.filter(mapped.y, timestampMs);
 
-    const rotation = this.updateRotation(snapshot, true);
-    const rotationBlocking = rotationBlocksGestures(rotation.phase);
+    // Only a gesture that already owns the hand disables rotation. A pinch candidate is just
+    // finger proximity noise until the press timer confirms it.
+    const gestureEngaged = this.pinchActive || this.fistActive;
+    const rotation = this.updateRotation(
+      gestureEngaged ? { ...snapshot, rotationEnabled: false } : snapshot,
+      true,
+    );
+    const rotationBlocking = rotationBlocksHandInput(rotation.phase);
 
     const straightness = maxFingerStraightness(points, aspectY);
     if (straightness !== undefined && straightness >= this.fistReleaseStraightness) this.fistNeedsOpen = false;
@@ -302,13 +347,28 @@ export class HandCursorDetector {
     let pinchRelease = false;
     let backProgress = 0;
     let fist = false;
+    // Judged on the raw anchor in camera space, so neither smoothing nor the active zone delays it.
+    const swipe = this.swipeDetector.update({
+      timestampMs,
+      x: raw.x,
+      y: raw.y * aspectY,
+      blocked:
+        !this.synced ||
+        rotationBlocking ||
+        this.pinchActive ||
+        this.fistActive ||
+        closedFist(points, false, this.fistEnterStraightness, this.fistReleaseStraightness, aspectY),
+    });
+    // Fingers touching mid-swipe, or right after it, must not click: they have to part again first.
+    if (swipe.moving) this.pinchNeedsRelease = true;
     if (this.synced) {
       const updatePinch = () => {
         const ratio = pinchRatio(points, aspectY);
         if (this.pinchNeedsRelease) {
           this.pinchActive = false;
           this.pinchCandidateSinceMs = undefined;
-          if (ratio >= this.pinchOffRatio) this.pinchNeedsRelease = false;
+          // Fingers seen apart mid-swipe do not count: the release has to happen once the hand slows.
+          if (ratio >= this.pinchOffRatio && !swipe.moving) this.pinchNeedsRelease = false;
           return;
         }
         if (this.pinchActive) {
@@ -398,20 +458,27 @@ export class HandCursorDetector {
     }
 
     const candidate = { x: clamp(smoothX), y: clamp(smoothY) };
-    if (pinching || pinchCandidate || fist || rotationBlocking) this.frozenPosition ??= this.lastFreePosition ?? candidate;
+    if (pinching || fist || rotationBlocking) this.frozenPosition ??= this.lastFreePosition ?? candidate;
     else this.frozenPosition = undefined;
     const position = this.frozenPosition ?? candidate;
-    if (!pinching && !pinchCandidate && !fist && !rotationBlocking) this.lastFreePosition = candidate;
+    if (!pinching && !fist && !rotationBlocking) this.lastFreePosition = candidate;
     this.lastPosition = position;
     return {
-      visible: this.synced,
+      // Visible while still syncing, so the progress ring can be seen.
+      visible: true,
       x: position.x,
       y: position.y,
       syncProgress: this.synced ? 1 : this.syncProgress(),
       synced: this.synced,
       pinching,
+      pinchState: pinching ? 'active' : pinchCandidate ? 'candidate' : 'idle',
+      freezeReason: pinching ? 'pinch' : fist ? 'fist' : rotationBlocking ? 'rotation' : undefined,
       pinchRelease,
       backProgress,
+      swipeDirection: swipe.direction,
+      swipeMoving: swipe.moving,
+      handInferenceMs: snapshot.handInferenceMs,
+      workerFps: snapshot.workerFps,
       activeZone: { ...this.activeZone },
       ...this.rotationOutput(rotation),
     };
@@ -438,6 +505,7 @@ export class HandCursorDetector {
     this.pinchActive = false;
     this.pinchCandidateSinceMs = undefined;
     this.rotationDetector.reset();
+    this.swipeDetector.reset();
   }
 
   private missing(snapshot: MenuHandSnapshot): HandCursorState {
@@ -460,16 +528,24 @@ export class HandCursorDetector {
     this.lastFreePosition = undefined;
     this.backSinceMs = undefined;
     this.fistActive = false;
+    this.swipeDetector.disarm();
     const position = this.lastPosition ?? { x: 0, y: 0 };
+    const stillSyncing =
+      !this.synced && this.lastPosition !== undefined && timestampMs - this.missingSinceMs <= PRESENCE_GAP_MS;
     return {
-      visible: this.synced,
+      visible: this.synced || stillSyncing,
       x: position.x,
       y: position.y,
-      syncProgress: this.synced ? 1 : 0,
+      syncProgress: this.synced ? 1 : stillSyncing ? this.syncProgress() : 0,
       synced: this.synced,
       pinching: false,
+      pinchState: 'idle',
       pinchRelease: false,
       backProgress: 0,
+      swipeDirection: 0,
+      swipeMoving: false,
+      handInferenceMs: snapshot.handInferenceMs,
+      workerFps: snapshot.workerFps,
       activeZone: { ...this.activeZone },
       ...this.rotationOutput(rotation),
     };

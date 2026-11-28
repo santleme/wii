@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CarouselStepResult } from './carouselController';
-import type { HandCursorInput } from './handCursorTypes';
+import type { HandInputStore } from './handInputStore';
 
 interface Props {
-  input: HandCursorInput;
+  store: HandInputStore;
   carouselRef: { current: CarouselStepResult | undefined };
 }
 
@@ -16,8 +16,16 @@ function velocityText(value: number | undefined): string {
   return value === undefined ? '—' : `${value.toFixed(0)}°/s`;
 }
 
+function millisecondsText(value: number | undefined): string {
+  return value === undefined ? '—' : `${value.toFixed(1)} ms`;
+}
+
+function fpsText(value: number | undefined): string {
+  return value === undefined ? '—' : `${value.toFixed(1)} fps`;
+}
+
 /** Overlay de diagnóstico real do pipeline de mão/carrossel; só existe com ?handDebug=1. */
-export function HandDebugOverlay({ input, carouselRef }: Props) {
+export function HandDebugOverlay({ store, carouselRef }: Props) {
   const enabled = useMemo(() => new URLSearchParams(window.location.search).get('handDebug') === '1', []);
   const [, setRefresh] = useState(0);
   useEffect(() => {
@@ -27,6 +35,7 @@ export function HandDebugOverlay({ input, carouselRef }: Props) {
   }, [enabled]);
   if (!enabled) return null;
 
+  const input = store.current;
   const carousel = carouselRef.current;
   const dtMs = input.rotationDtMs;
   const fps = dtMs && dtMs > 0 ? 1000 / dtMs : undefined;
@@ -36,6 +45,10 @@ export function HandDebugOverlay({ input, carouselRef }: Props) {
     <strong>hand debug</strong>
     <dl>
       <dt>fase</dt><dd>{input.rotationPhase}</dd>
+      <dt>pinça</dt><dd>{input.pinchState}{input.freezeReason ? ` · congelado por ${input.freezeReason}` : ''}</dd>
+      <dt>swipe</dt><dd>{input.swipeMoving ? 'movendo' : 'parado'} · direção {input.swipeDirection}</dd>
+      <dt>latência mão</dt><dd>{millisecondsText(input.handInferenceMs)}</dd>
+      <dt>worker mão</dt><dd>{fpsText(input.workerFps)}</dd>
       <dt>forma</dt><dd>{input.rotationHandShape ?? '—'} · curvatura {input.rotationCurvature?.toFixed(2) ?? '—'}</dd>
       <dt>normal palma</dt><dd>{vectorText(input.rotationOrientation?.zAxis)}</dd>
       <dt>eixo punho→médio</dt><dd>{vectorText(input.rotationOrientation?.yAxis)}</dd>

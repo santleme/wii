@@ -26,7 +26,8 @@ export interface HandWorkerFrame {
   type: 'FRAME';
   requestId: number;
   timestampMs: number;
-  bitmap: ImageBitmap;
+  /** Transferred to the worker, which closes it. */
+  bitmap: ImageBitmap | VideoFrame;
 }
 
 export type HandWorkerRequest = HandWorkerInit | HandWorkerFrame | { type: 'DISPOSE' };

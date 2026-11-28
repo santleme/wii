@@ -1,0 +1,130 @@
+<!doctype html>
+<!-- Benchmark local do HandLandmarker no worker real do build: warm-up (1º frame) e p50/p95 do
+     round-trip FRAME → HAND em GPU e CPU.
+     Uso: `npm run build && cp scripts/hand-bench.html dist/hand-bench.html && npm run preview`,
+     depois abra http://localhost:4173/hand-bench.html. Resultados em window.BENCH / console.
+     Para o caminho "tracked": `curl -o dist/hand.jpg
+     https://storage.googleapis.com/mediapipe-tasks/hand_landmarker/woman_hands.jpg` antes de abrir.
+     Antes/depois: rode a mesma página sobre o build de cada commit. -->
+<meta charset="utf-8">
+<title>hand bench</title>
+<script type="module">
+// O nome do chunk do worker tem hash do build e fica num chunk lazy: segue os imports do bundle.
+async function findInBundle(pattern) {
+  const html = await (await fetch('/')).text();
+  const queue = [...html.matchAll(/assets\/[A-Za-z0-9_.-]+\.js/g)].map((match) => match[0]);
+  const seen = new Set();
+  const sources = [];
+  while (queue.length) {
+    const path = queue.shift();
+    if (seen.has(path)) continue;
+    seen.add(path);
+    const source = await (await fetch(`/${path}`)).text();
+    sources.push(source);
+    for (const match of source.matchAll(/(?:assets\/|\.\/)([A-Za-z0-9_.-]+\.js)/g)) queue.push(`assets/${match[1]}`);
+    const found = source.match(pattern);
+    if (found) return { found: found[0], sources };
+  }
+  throw new Error(`${pattern} não encontrado no bundle`);
+}
+
+const { found: workerName, sources } = await findInBundle(/hand\.worker-[A-Za-z0-9_-]+\.js/);
+const WORKER_URL = `/assets/${workerName}`;
+let WASM = null;
+for (const version of new Set(sources.join('\n').match(/\d+\.\d+\.\d+/g))) {
+  const res = await fetch(`/mediapipe/wasm-${version}/vision_wasm_module_internal.js`, { method: 'HEAD' });
+  // vite preview responde 200+index.html em rota inexistente: exige JavaScript de verdade.
+  if (res.ok && (res.headers.get('content-type') ?? '').includes('javascript')) {
+    WASM = `${location.origin}/mediapipe/wasm-${version}`;
+    break;
+  }
+}
+if (!WASM) throw new Error('dir wasm versionado não encontrado');
+const sums = await (await fetch('/mediapipe/models/SHA256SUMS')).text();
+const sha8 = sums.match(/([0-9a-f]{64})\s+hand_landmarker/)[1].slice(0, 8);
+const MODEL = `${location.origin}/mediapipe/models/hand_landmarker.${sha8}.task`;
+const FRAMES = 60;
+const SETTLE = 8;
+
+function stats(values) {
+  if (!values.length) return { n: 0 };
+  const sorted = [...values].sort((a, b) => a - b);
+  const q = (p) => +sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))].toFixed(2);
+  return { n: sorted.length, p50: q(0.5), p95: q(0.95), max: +sorted.at(-1).toFixed(2) };
+}
+
+async function bench(delegate, source, width, label) {
+  const worker = new Worker(WORKER_URL, { type: 'module' });
+  const out = { input: label, width, requested: delegate, errors: [], detected: 0, empty: 0 };
+  let pending;
+  let ready;
+  worker.onmessage = ({ data }) => {
+    if (data.type === 'READY') { out.delegate = data.delegate; ready?.(true); }
+    else if (data.type === 'FALLBACK') out.fellBack = data.reason;
+    else if (data.type === 'ERROR' && data.stage === 'init') { out.errors.push(data.message); ready?.(false); }
+    else pending?.(data);
+  };
+  const started = performance.now();
+  const isReady = await new Promise((resolve) => {
+    ready = resolve;
+    worker.postMessage({ type: 'INIT', delegate, wasmBaseUrl: WASM, modelUrl: MODEL });
+    setTimeout(() => resolve(false), 45_000);
+  });
+  out.initMs = +(performance.now() - started).toFixed(1);
+  const times = [];
+  const copies = [];
+  let lastTs = 0;
+  for (let i = 0; isReady && i < SETTLE + FRAMES; i++) {
+    const copyStart = performance.now();
+    const bitmap = await createImageBitmap(source, { resizeWidth: width, resizeQuality: 'low' });
+    const copyMs = performance.now() - copyStart;
+    lastTs = Math.max(performance.now(), lastTs + 0.01);
+    const sentAt = performance.now();
+    const reply = await new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve({ type: 'ERROR', message: 'frame timeout >15s' }), 15_000);
+      pending = (data) => { clearTimeout(timeout); resolve(data); };
+      worker.postMessage({ type: 'FRAME', requestId: i + 1, timestampMs: lastTs, bitmap }, [bitmap]);
+    });
+    const ms = performance.now() - sentAt;
+    if (reply.type !== 'HAND') { out.errors.push(reply.message); if (reply.fatal !== false || out.errors.length > 3) break; continue; }
+    if (i === 0) out.firstFrameMs = +ms.toFixed(1);
+    // Depois de um fallback os tempos são de outro delegate: não entram nos mesmos percentis.
+    if (out.fellBack) break;
+    if (i >= SETTLE) {
+      times.push(ms);
+      copies.push(copyMs);
+      if (reply.hands.length) out.detected++; else out.empty++;
+    }
+  }
+  out.roundTrip = stats(times);
+  out.copy = stats(copies);
+  worker.terminate();
+  return out;
+}
+
+let input;
+let label = 'photo';
+try {
+  const image = new Image();
+  image.src = '/hand.jpg';
+  await image.decode();
+  input = new OffscreenCanvas(640, 480);
+  input.getContext('2d').drawImage(image, 0, 0, 640, 480);
+} catch {
+  // Sem foto o modelo só roda o detector de palma: mede o caminho "sem mão".
+  label = 'blank';
+  input = new OffscreenCanvas(640, 480);
+  const context = input.getContext('2d');
+  context.fillStyle = '#8aa0b4';
+  context.fillRect(0, 0, 640, 480);
+}
+
+window.BENCH = { runs: [], ua: navigator.userAgent, hwc: navigator.hardwareConcurrency };
+for (const [delegate, width] of [['CPU', 640], ['CPU', 320], ['GPU', 640]]) {
+  const run = await bench(delegate, input, width, label);
+  window.BENCH.runs.push(run);
+  console.log('RUN', JSON.stringify(run));
+}
+window.BENCH_DONE = true;
+document.body.textContent = JSON.stringify(window.BENCH, null, 2);
+</script>

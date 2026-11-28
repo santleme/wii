@@ -15,7 +15,7 @@ const harness = vi.hoisted(() => ({
   handDispose: vi.fn(),
   handErrorCallbacks: [] as Array<(error: Error) => void>,
   handFrameCallbacks: [] as Array<(snapshot: HandSnapshot, aspectY: number) => void>,
-  handInput: null as unknown,
+  handStore: null as null | { current: unknown },
   poseInit: vi.fn(),
   poseBeginCapture: vi.fn(),
   posePauseCapture: vi.fn(),
@@ -90,8 +90,8 @@ vi.mock('../src/games/audio', () => ({
 
 vi.mock('../src/ui/PoseOverlay', () => ({ drawPose: vi.fn() }));
 vi.mock('../src/ui/HandCursor', () => ({
-  HandCursor: ({ input }: { input: unknown }) => {
-    harness.handInput = input;
+  HandCursor: ({ store }: { store: { current: unknown } }) => {
+    harness.handStore = store;
     return null;
   },
 }));
@@ -168,7 +168,7 @@ describe('App vision mode lifecycle', () => {
     harness.handCallbacks = null;
     harness.handErrorCallbacks = [];
     harness.handFrameCallbacks = [];
-    harness.handInput = null;
+    harness.handStore = null;
     harness.handInit.mockReset();
     harness.poseInit.mockReset();
     vi.clearAllMocks();
@@ -328,7 +328,7 @@ describe('App vision mode lifecycle', () => {
       }
     });
 
-    expect(harness.handInput).toMatchObject({ visible: false, synced: false, syncProgress: 0 });
+    expect(harness.handStore?.current).toMatchObject({ visible: false, synced: false, syncProgress: 0 });
     expect(track.stop).not.toHaveBeenCalled();
     expect(container!.querySelector('[data-testid="stop-camera"]')).not.toBeNull();
   });
@@ -347,5 +347,28 @@ describe('App vision mode lifecycle', () => {
     expect(track.stop).toHaveBeenCalledOnce();
     expect(container!.querySelector('[data-testid="start-camera"]')).not.toBeNull();
     expect(container!.querySelector('[data-testid="camera-status"]')!.textContent).toBe('Worker constructor failed.');
+  });
+
+  it('publishes capture-to-delivery latency and worker rate with hand frames', async () => {
+    harness.handInit.mockResolvedValue(undefined);
+
+    const stream = { getTracks: () => [] } as unknown as MediaStream;
+    prepareMedia(async () => stream);
+    await mountApp();
+    await clickStartCamera();
+    expect(harness.handFrameCallbacks).toHaveLength(1);
+
+    const now = vi.spyOn(performance, 'now');
+    now.mockReturnValue(1000);
+    await act(async () => {
+      harness.handFrameCallbacks[0]!(handSnapshot(950), 0.75);
+    });
+    expect(harness.handStore?.current).toMatchObject({ handInferenceMs: 50 });
+
+    now.mockReturnValue(1080);
+    await act(async () => {
+      harness.handFrameCallbacks[0]!(handSnapshot(1000), 0.75);
+    });
+    expect(harness.handStore?.current).toMatchObject({ handInferenceMs: 80, workerFps: 12.5 });
   });
 });

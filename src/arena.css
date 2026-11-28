@@ -167,8 +167,8 @@
 
   /* controle por mão: cursor (a ponta do indicador é a origem) */
   .hand-layer { position: fixed; inset: 0; z-index: 120; overflow: hidden; pointer-events: none; }
-  .hand-cursor { position: absolute; top: 0; left: 0; width: 0; height: 0; }
-  .hand-body { position: absolute; transform-origin: 0 0; transition: opacity .35s ease, scale .35s ease, visibility .35s; }
+  .hand-cursor { position: absolute; top: 0; left: 0; width: 0; height: 0; will-change: transform; }
+  .hand-body { position: absolute; transform-origin: 0 0; transition: opacity .12s ease, scale .12s ease, visibility .12s; }
   .hand-cursor.pinching .hand-body { scale: .88; transition-duration: .12s; }
   .hand-cursor.off .hand-body { opacity: 0; scale: .97; visibility: hidden; transition-duration: .35s; }
   .hand-ring { position: absolute; left: -40px; top: -22px; width: 80px; height: 80px; rotate: -90deg; fill: none; stroke-width: 6; stroke-linecap: round; }
