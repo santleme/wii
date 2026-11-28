@@ -129,6 +129,41 @@ describe('ProceduralAudio tennis cues', () => {
   });
 });
 
+describe('ProceduralAudio speech cancellation', () => {
+  it('setMuted(true) and dispose() cancel speech already in progress', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    const cancel = vi.fn();
+    vi.stubGlobal('speechSynthesis', { cancel, speak: vi.fn() });
+    vi.stubGlobal('SpeechSynthesisUtterance', class { constructor(readonly text: string) {} });
+    const audio = new ProceduralAudio();
+    await audio.unlock();
+
+    audio.say('Quinze a zero');
+    cancel.mockClear(); // say() cancels before speaking; only the mute/dispose calls count below
+    audio.setMuted(false);
+    expect(cancel).not.toHaveBeenCalled();
+
+    audio.setMuted(true);
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    audio.setMuted(false);
+    audio.say('Trinta a zero');
+    cancel.mockClear();
+    audio.dispose();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('mute and dispose stay silent when speechSynthesis is unavailable', async () => {
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    const audio = new ProceduralAudio();
+    await audio.unlock();
+    expect(() => {
+      audio.setMuted(true);
+      audio.dispose();
+    }).not.toThrow();
+  });
+});
+
 describe('ProceduralAudio boxing cues', () => {
   it('does nothing before unlock or when AudioContext is unavailable', async () => {
     vi.stubGlobal('AudioContext', FakeAudioContext);
