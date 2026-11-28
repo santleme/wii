@@ -1,4 +1,5 @@
 export const BOXING_MODES = [
+  { id: 'tutorial', label: 'Tutorial' },
   { id: 'fight', label: 'Luta' },
   { id: 'bag', label: 'Saco de Pancada' },
   { id: 'dodge', label: 'Esquiva' },

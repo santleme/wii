@@ -1,17 +1,87 @@
-import type { CalibrationProfile, PoseSnapshot } from '../cv/protocol';
+import type { CalibrationProfile, PoseSnapshot } from '@wii/spatial-core';
 import { OneEuroFilter } from '@wii/spatial-core';
 import { clamp, median, midpoint } from './math';
 
 const MIN_SHOULDER_WIDTH = 0.03;
 const MIN_TORSO_HEIGHT = 0.03;
-/** Into a side lane past this displacement, in shoulder widths — a deliberate but comfortable lean. */
-export const ENTER_LANE_SW = 0.12;
-/** Back to center inside this displacement — the hysteresis gap keeps zone noise from flapping lanes. */
-export const EXIT_LANE_SW = 0.05;
 /** The width used as the unit never drops below this share of the recently observed width. */
 const WIDTH_FLOOR_RATIO = 0.9;
 /** How fast the observed width follows shoulders that stay narrower, e.g. after stepping back. */
 const WIDTH_DECAY_MS = 3000;
+/**
+ * Into a side lane past this displacement, in shoulder widths. A real recording put players coming
+ * "back to center" up to 0.26 away from where they started, and deliberate side steps at 0.75–1.0.
+ */
+export const ENTER_LANE_SW = 0.35;
+/** Back to center inside this displacement — the hysteresis gap keeps zone noise from flapping lanes. */
+export const EXIT_LANE_SW = 0.2;
+/** The center is wherever the player stands still this long, within this spread (shoulder widths). */
+const CENTER_STILL_MS = 1000;
+const CENTER_STILL_SPREAD_SW = 0.1;
+/** Standing still at a clearly different size means the player moved nearer or farther: measure again. */
+const RECENTER_SCALE_CHANGE = 0.2;
+
+/**
+ * Lane control by body position, not gesture: the lane follows where the player's torso actually
+ * is, continuously — lean the trunk or step sideways, both move the shoulder center the same way.
+ * Measured from where the player stood still, in the frame's own shoulder widths, positive
+ * toward the player's right: in raw camera coordinates the player's right is toward image left,
+ * so rightward displacement is center − centerX. Position cannot invert the way an
+ * edge-triggered lean gesture did — returning to center at worst leaves the side lane, and
+ * snap-back overshoot past center is just noise below the opposite threshold.
+ */
+export class LanePositionTracker {
+  private readonly filter = new OneEuroFilter({ minCutoff: 1.2, beta: 0.4, derivativeCutoff: 1 });
+  private zone: -1 | 0 | 1 = 0;
+  private center?: { x: number; width: number };
+  private recent: { t: number; x: number; width: number }[] = [];
+
+  /** The lane zone the body occupies; undefined until a center exists or when shoulders are unreadable. */
+  update(snapshot: PoseSnapshot): -1 | 0 | 1 | undefined {
+    const leftShoulder = snapshot.landmarks[11];
+    const rightShoulder = snapshot.landmarks[12];
+    if (!leftShoulder || !rightShoulder) return undefined;
+    // x is normalized by frame width and y by frame height independently, so a raw hypot would
+    // mix units: in landscape frames the y contribution is over-weighted and the measured width
+    // would inflate as the shoulders tilt in-plane — exactly while the player leans to dodge.
+    const aspect = snapshot.frameHeight / snapshot.frameWidth;
+    const width = Math.hypot(leftShoulder.x - rightShoulder.x, (leftShoulder.y - rightShoulder.y) * aspect);
+    if (!Number.isFinite(width) || width < MIN_SHOULDER_WIDTH) return undefined;
+    const centerX = (leftShoulder.x + rightShoulder.x) / 2;
+    if (!Number.isFinite(centerX)) return undefined;
+    this.measureCenter(snapshot.timestampMs, centerX, width);
+    if (!this.center) return undefined;
+    const displacement = (this.center.x - centerX) / width;
+    const u = this.filter.filter(displacement, snapshot.timestampMs);
+    if (this.zone === 0) {
+      if (u >= ENTER_LANE_SW) this.zone = 1;
+      else if (u <= -ENTER_LANE_SW) this.zone = -1;
+    } else if (this.zone === 1 && u <= EXIT_LANE_SW) this.zone = 0;
+    else if (this.zone === -1 && u >= -EXIT_LANE_SW) this.zone = 0;
+    return this.zone;
+  }
+
+  /** The zone the state machine currently believes the body occupies — even while updates pause. */
+  get currentZone(): -1 | 0 | 1 { return this.zone; }
+
+  reset(): void { this.filter.reset(); this.zone = 0; this.center = undefined; this.recent = []; }
+
+  /** Sets the center once; it then stays put, so holding a side lane can never drag it along. */
+  private measureCenter(t: number, x: number, width: number): void {
+    const previous = this.recent.at(-1);
+    if (previous && t - previous.t > 200) this.recent = [];
+    this.recent.push({ t, x, width });
+    while (this.recent.length > 1 && t - this.recent[1]!.t >= CENTER_STILL_MS) this.recent.shift();
+    if (t - this.recent[0]!.t < CENTER_STILL_MS) return;
+    const xs = this.recent.map((sample) => sample.x);
+    const stillWidth = median(this.recent.map((sample) => sample.width));
+    if ((Math.max(...xs) - Math.min(...xs)) / stillWidth > CENTER_STILL_SPREAD_SW) return;
+    if (this.center && Math.abs(stillWidth / this.center.width - 1) <= RECENTER_SCALE_CHANGE) return;
+    this.center = { x: median(xs), width: stillWidth };
+    this.filter.reset();
+    this.zone = 0;
+  }
+}
 
 /**
  * Aspect-corrected distance in frame widths. x is normalized by frame width and y by frame height
@@ -54,21 +124,21 @@ export class ShoulderUnit {
   reset(): void { this.reference = undefined; }
 }
 
+/** Into a dodge past this displacement, in shoulder widths — a deliberate but comfortable lean. */
+export const ENTER_DODGE_SW = 0.12;
+/** Back to center inside this displacement. */
+export const EXIT_DODGE_SW = 0.05;
+
 /**
- * Lane control by body position, not gesture: the lane follows where the player's torso actually
- * is, continuously — lean the trunk or step sideways, both move the shoulder center the same way.
- * Measured against the calibrated neutral center in the frame's own shoulder widths, positive
- * toward the player's right: in raw camera coordinates the player's right is toward image left,
- * so rightward displacement is centerX0 − centerX. Position cannot invert the way an
- * edge-triggered lean gesture did — returning to center at worst leaves the side lane, and
- * snap-back overshoot past center is just noise below the opposite threshold.
+ * Boxing's dodge: far more sensitive than lane control and measured from the calibrated neutral,
+ * since a boxer leans out of a punch's way instead of stepping to another lane.
  */
-export class LanePositionTracker {
+export class DodgeZoneTracker {
   private readonly filter = new OneEuroFilter({ minCutoff: 1.2, beta: 0.4, derivativeCutoff: 1 });
   private zone: -1 | 0 | 1 = 0;
   private readonly unit = new ShoulderUnit();
 
-  /** The lane zone the body currently occupies, or undefined when the shoulders are unreadable. */
+  /** The dodge zone the body currently occupies, or undefined when the shoulders are unreadable. */
   update(snapshot: PoseSnapshot, calibration: CalibrationProfile): -1 | 0 | 1 | undefined {
     const leftShoulder = snapshot.landmarks[11];
     const rightShoulder = snapshot.landmarks[12];
@@ -78,10 +148,10 @@ export class LanePositionTracker {
     const displacement = (calibration.image.shoulderCenterX0 - centerX) / unit;
     const u = this.filter.filter(displacement, snapshot.timestampMs);
     if (this.zone === 0) {
-      if (u >= ENTER_LANE_SW) this.zone = 1;
-      else if (u <= -ENTER_LANE_SW) this.zone = -1;
-    } else if (this.zone === 1 && u <= EXIT_LANE_SW) this.zone = 0;
-    else if (this.zone === -1 && u >= -EXIT_LANE_SW) this.zone = 0;
+      if (u >= ENTER_DODGE_SW) this.zone = 1;
+      else if (u <= -ENTER_DODGE_SW) this.zone = -1;
+    } else if (this.zone === 1 && u <= EXIT_DODGE_SW) this.zone = 0;
+    else if (this.zone === -1 && u >= -EXIT_DODGE_SW) this.zone = 0;
     return this.zone;
   }
 
@@ -180,4 +250,111 @@ export class RingDepthTracker {
   get approach01(): number | undefined { return this.speed; }
 
   reset(): void { this.filter.reset(); this.move = 0; this.speed = undefined; this.outsideSinceMs = undefined; this.outsideSign = 0; this.pending = undefined; this.torso = undefined; }
+}
+
+/** The shoulder line moving vertically faster than this, in image shoulder widths per second,
+ * means the torso reference frame itself is in fast motion — wrist measurements relative to it
+ * are dominated by the torso, not the arm, so punch onsets are vetoed while it lasts. A duck
+ * drop peaks around 1-2 sw/s; punching barely moves the shoulders vertically. */
+export const REFERENCE_VETO_SPEED_SW_PER_S = 0.7;
+
+/**
+ * Vertical speed of the shoulder-line midpoint in image space, normalized by shoulder width —
+ * the same space the duck is measured in, because world landmarks are hip-origin and a crouch
+ * moves the origin with the shoulders. Positive is descending. Light filtering only: a duck
+ * drop spans a handful of frames and heavy smoothing would both miss it and outlast it.
+ */
+export class ShoulderLineVerticalSpeed {
+  private readonly filter = new OneEuroFilter({ minCutoff: 2, beta: 0.5, derivativeCutoff: 1 });
+  private previous?: { y: number; t: number };
+  private readonly unit = new ShoulderUnit();
+
+  /** Speed in shoulder widths per second; undefined while the shoulders or scale are unreadable. */
+  update(snapshot: PoseSnapshot): number | undefined {
+    const leftShoulder = snapshot.landmarks[11];
+    const rightShoulder = snapshot.landmarks[12];
+    const width = this.unit.update(snapshot);
+    if (!leftShoulder || !rightShoulder || width === undefined) return undefined;
+    const aspect = snapshot.frameHeight / snapshot.frameWidth;
+    const raw = ((leftShoulder.y + rightShoulder.y) / 2) * aspect / width;
+    if (!Number.isFinite(raw)) return undefined;
+    const y = this.filter.filter(raw, snapshot.timestampMs);
+    const previous = this.previous;
+    this.previous = { y, t: snapshot.timestampMs };
+    if (!previous) return undefined;
+    const dt = (snapshot.timestampMs - previous.t) / 1000;
+    if (dt <= 0 || dt > 0.3) return undefined;
+    return (y - previous.y) / dt;
+  }
+
+  reset(): void { this.filter.reset(); this.previous = undefined; this.unit.reset(); }
+}
+
+/** Into a duck past this drop below the standing baseline, in shoulder widths. */
+export const ENTER_DUCK_SW = 0.18;
+/** Back up inside this drop — the hysteresis gap keeps a crouched bob from flapping. */
+export const EXIT_DUCK_SW = 0.1;
+/** The standing baseline comes only from readings this still, held this long. */
+const DUCK_BASELINE_STILL_MS = 800;
+const DUCK_BASELINE_STILL_SPREAD_SW = 0.05;
+
+/**
+ * Boxing's duck: a fast, reversible vertical drop of the shoulder line below the player's own
+ * standing baseline. Measured in image space, not world landmarks — the world frame is
+ * hip-origin, so a crouch lowers the origin with the shoulders and the drop vanishes. The
+ * baseline is measured from frames where the player stands still, the same philosophy as the
+ * lane center: a player who starts out crouched is simply standing there. Frozen while a punch
+ * is in flight, since punching dips the shoulder line on its own.
+ */
+export class DuckTracker {
+  private readonly filter = new OneEuroFilter({ minCutoff: 1.5, beta: 0.5, derivativeCutoff: 1 });
+  private ducked = false;
+  private baseline?: number;
+  private readonly unit = new ShoulderUnit();
+  private recent: { t: number; y: number }[] = [];
+
+  /**
+   * Whether the body is currently ducked, or undefined when the shoulders are unreadable or
+   * no standing baseline exists yet. While `punching`, the last state holds.
+   */
+  update(snapshot: PoseSnapshot, punching = false): boolean | undefined {
+    const leftShoulder = snapshot.landmarks[11];
+    const rightShoulder = snapshot.landmarks[12];
+    const width = this.unit.update(snapshot);
+    if (!leftShoulder || !rightShoulder || width === undefined) return undefined;
+    if (punching) return this.ducked;
+    // y is normalized by frame height but x by frame width: rescale y into frame-width units
+    // so the drop is measured in the same shoulder widths as the dodge displacement.
+    const aspect = snapshot.frameHeight / snapshot.frameWidth;
+    const y = ((leftShoulder.y + rightShoulder.y) / 2) * aspect / width;
+    if (!Number.isFinite(y)) return undefined;
+    this.measureBaseline(snapshot.timestampMs, y);
+    if (this.baseline === undefined) return undefined;
+    const drop = this.filter.filter(y - this.baseline, snapshot.timestampMs);
+    if (!this.ducked && drop >= ENTER_DUCK_SW) this.ducked = true;
+    else if (this.ducked && drop <= EXIT_DUCK_SW) this.ducked = false;
+    return this.ducked;
+  }
+
+  /** The duck state the tracker currently believes — even while updates pause. */
+  get current(): boolean { return this.ducked; }
+
+  reset(): void { this.filter.reset(); this.ducked = false; this.baseline = undefined; this.recent = []; this.unit.reset(); }
+
+  /**
+   * The standing baseline comes from stillness, exactly like the lane center. While ducked the
+   * baseline never updates — a held duck must not drag it down and erase itself.
+   */
+  private measureBaseline(t: number, y: number): void {
+    const previous = this.recent.at(-1);
+    if (previous && t - previous.t > 200) this.recent = [];
+    this.recent.push({ t, y });
+    while (this.recent.length > 1 && t - this.recent[1]!.t >= DUCK_BASELINE_STILL_MS) this.recent.shift();
+    if (t - this.recent[0]!.t < DUCK_BASELINE_STILL_MS) return;
+    const ys = this.recent.map((sample) => sample.y);
+    if (Math.max(...ys) - Math.min(...ys) > DUCK_BASELINE_STILL_SPREAD_SW) return;
+    const still = median(ys);
+    if (this.baseline === undefined) this.baseline = still;
+    else if (!this.ducked) this.baseline += (still - this.baseline) * 0.2;
+  }
 }

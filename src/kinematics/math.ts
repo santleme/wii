@@ -1,4 +1,4 @@
-import type { Point3 } from '../cv/protocol';
+import type { Point3 } from '@wii/spatial-core';
 
 export const clamp = (value: number, min = 0, max = 1): number => Math.min(max, Math.max(min, value));
 export const midpoint = (a: Point3, b: Point3): Point3 => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 });
@@ -23,4 +23,9 @@ export function landmarkConfidence(...points: Point3[]): number {
     // (comparações com NaN são falsas) e entrava como válido nas medianas da calibração.
     return Number.isFinite(confidence) ? confidence : 0;
   }));
+}
+
+export function visibleImagePoint(point: Point3 | undefined, minimumConfidence: number): point is Point3 {
+  return point !== undefined && landmarkConfidence(point) >= minimumConfidence
+    && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1;
 }

@@ -1,4 +1,4 @@
-import { solveOutgoing, type BallState } from './ballistics';
+import { solveOverNet, type BallState } from './ballistics';
 
 /**
  * Pure swing adjudication by timing — the heart of the tennis design
@@ -48,9 +48,9 @@ export const DEFAULT_GEOMETRY: ContactGeometry = {
   contactPlaneZ: 7.2,
   playerZ: 8.3,
   passMarginZ: 1.2,
-  reachRadius: 1.15,
-  maxTimingMs: 280,
-  timingSpanMs: 200,
+  reachRadius: 2.2,
+  maxTimingMs: 500,
+  timingSpanMs: 350,
   maxLateralTargetX: 2.8,
   centerAimX: 0.9,
   deepTargetZ: -9.2,
@@ -59,6 +59,15 @@ export const DEFAULT_GEOMETRY: ContactGeometry = {
   minForwardSpeed: 11,
   maxForwardSpeed: 20,
 };
+
+/** Finish heights in shoulder widths above the shoulder line. */
+// A backhand ends higher than a forehand without meaning to, so each side has its own line.
+const HIGH_FINISH = { forehand: 1.4, backhand: 2 };
+const LOW_FINISH = -0.5;
+
+export function strokeHeight(contactY: number, side: 'forehand' | 'backhand'): 'high' | 'normal' | 'low' {
+  return contactY >= HIGH_FINISH[side] ? 'high' : contactY <= LOW_FINISH ? 'low' : 'normal';
+}
 
 const clamp01 = (value: number) => Math.min(1, Math.max(0, value));
 const clampSigned = (value: number) => Math.min(1, Math.max(-1, value));
@@ -87,6 +96,7 @@ export type ContactOutcome =
       quality01: number;
       spin: number;
       smash: boolean;
+      height: 'high' | 'normal' | 'low';
     };
 
 export interface AdjudicationQuery {
@@ -148,10 +158,13 @@ export function adjudicateContact(query: AdjudicationQuery): ContactOutcome {
 
   // Depth follows pace: harder shots land deeper; flight time is imposed by the pace.
   const depthT = clamp01((forwardSpeed - geo.minForwardSpeed) / (geo.maxForwardSpeed - geo.minForwardSpeed));
-  const targetZ = geo.shallowTargetZ + (geo.deepTargetZ - geo.shallowTargetZ) * depthT;
-  const flightTime = (ballAtPeak.position.z - targetZ) / forwardSpeed;
+  // Where the stroke finished shapes the arc: above the head lobs deep, below the chest skims the net.
+  const height = strokeHeight(swing.contactY, swing.side);
+  const targetZ = height === 'high' ? geo.deepTargetZ : geo.shallowTargetZ + (geo.deepTargetZ - geo.shallowTargetZ) * depthT;
+  const flightTime = ((ballAtPeak.position.z - targetZ) / forwardSpeed) * (height === 'high' ? 1.5 : height === 'low' ? 0.85 : 1);
 
-  const outgoing = solveOutgoing(ballAtPeak.position, { x: aimX, z: targetZ }, flightTime);
+  const clearance = height === 'high' ? 2.8 : height === 'low' ? 1.05 : 1.25;
+  const outgoing = solveOverNet(ballAtPeak.position, { x: aimX, z: targetZ }, flightTime, clearance);
   const spin = clampSigned(swing.verticalSpeed / 3);
 
   return {
@@ -163,5 +176,6 @@ export function adjudicateContact(query: AdjudicationQuery): ContactOutcome {
     quality01,
     spin,
     smash,
+    height,
   };
 }

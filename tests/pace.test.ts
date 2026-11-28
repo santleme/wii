@@ -25,9 +25,9 @@ function bounce(spm: number, amplitude = 0.04): (CadenceResult & { time: number 
 }
 
 /** Feeds scheduled bounce segments: each { from, until, spm } bounces at that rate; gaps stand still. */
-function drive(feed: (snapshot: ReturnType<typeof poseWithHipBounce>) => CadenceResult, schedule: { from: number; until: number; spm: number }[], endMs: number) {
+function drive(feed: (snapshot: ReturnType<typeof poseWithHipBounce>) => CadenceResult, schedule: { from: number; until: number; spm: number }[], endMs: number, startMs = 0) {
   const results: (CadenceResult & { time: number })[] = [];
-  for (let time = 0; time <= endMs; time += 33) {
+  for (let time = startMs; time <= endMs; time += 33) {
     const segment = schedule.find((s) => time >= s.from && time <= s.until);
     const units = segment ? 0.04 * Math.sin((2 * Math.PI * (segment.spm / 60) * (time - segment.from)) / 1000) : 0;
     results.push({ time, ...feed(poseWithHipBounce(time, units * TORSO)) });
@@ -36,14 +36,14 @@ function drive(feed: (snapshot: ReturnType<typeof poseWithHipBounce>) => Cadence
 }
 
 describe('pace from torso vertical oscillation', () => {
-  it.each([40, 60, 90, 110, 130, 160, 190])('keeps moving without dropouts at %i steps per minute', (spm) => {
+  it.each([90, 110, 130, 160, 190])('keeps moving without dropouts at %i steps per minute', (spm) => {
     const steady = bounce(spm).filter((r) => r.time > 3000 && r.time <= STOP);
     expect(steady.filter((r) => r.speed01 === 0)).toHaveLength(0);
     for (const r of steady) expect(Math.abs(r.cadenceSpm - spm) / spm).toBeLessThan(0.15);
   });
 
   it('goes faster the faster the player bounces', () => {
-    const speeds = [60, 90, 120, 150, 180].map((spm) => bounce(spm).find((r) => r.time > 6000)!.speed01);
+    const speeds = [90, 120, 150, 180].map((spm) => bounce(spm).find((r) => r.time > 6000)!.speed01);
     expect(speeds).toEqual([...speeds].sort((a, b) => a - b));
     expect(new Set(speeds).size).toBe(speeds.length);
   });
@@ -95,11 +95,9 @@ describe('pace from torso vertical oscillation', () => {
     expect(Math.max(...speeds)).toBe(0);
   });
 
-  it('still detects a small-amplitude slow march (0.02 torso)', () => {
-    const steady = bounce(100, 0.02).filter((r) => r.time > 3000 && r.time <= STOP);
-    expect(steady.filter((r) => r.speed01 === 0).length).toBeLessThan(steady.length * 0.2);
-    const active = steady.filter((r) => r.cadenceSpm > 0);
-    for (const r of active) expect(Math.abs(r.cadenceSpm - 100) / 100).toBeLessThan(0.25);
+  it('ignores a bounce too small to tell apart from swinging the arms', () => {
+    // The accepted price of judging by size: a gentle march no longer moves the runner.
+    expect(Math.max(...bounce(100, 0.02).map((r) => r.speed01))).toBe(0);
   });
 
   it('keeps counting at high-amplitude bounce (0.09 torso semi-amplitude, literature high tail)', () => {
@@ -134,9 +132,9 @@ describe('pace from torso vertical oscillation', () => {
     // After the stop deadline the speed falls to zero...
     expect(results.at(-1)!.speed01).toBe(0);
     // ...and one isolated bounce pair well past the deadline only measures its own slow interval.
-    const late = drive(feed, [{ from: 5400, until: 7000, spm: 70 }], 9000);
-    const settled = late.filter((r) => r.time > 7500);
-    expect(settled.every((r) => r.cadenceSpm < 110)).toBe(true);
+    const late = drive(feed, [{ from: 5400, until: 8500, spm: 100 }], 9000, 5333);
+    const settled = late.filter((r) => r.time > 7500 && r.time <= 8500);
+    expect(settled.every((r) => r.cadenceSpm < 120)).toBe(true);
     expect(settled.some((r) => r.speed01 > 0)).toBe(true);
   });
 

@@ -4,7 +4,7 @@ import { bodyLocalPoint } from '../kinematics/bodyFrame';
 import { EXIT_LANE_SW } from '../kinematics/postureSignals';
 import { clamp, distance3, isFinitePoint, landmarkConfidence, median, midpoint } from '../kinematics/math';
 
-const CORE = [11, 12, 23, 24] as const;
+const UPPER_CORE = [11, 12] as const;
 const WRIST_INDEX: Record<Hand, 15 | 16> = { left: 15, right: 16 };
 const MIN_CONFIDENCE = 0.55;
 const CORE_WINDOW_MS = 8000;
@@ -141,13 +141,16 @@ export class AdaptiveCalibrator {
   private poseDisagreementSince?: number;
   private centerStarvedSince?: number;
   private laneZone: -1 | 0 | 1 = 0;
+  private centerBandSw = EXIT_LANE_SW;
 
   /**
    * Consumes one frame. `laneZone` is the lane state machine's current zone: it is the only
    * reliable discriminator between stance and control input inside the hysteresis band — while
    * the zone is center, no lane is held, so a band displacement must be the player's stance.
+   * `centerBandSw` is that machine's return-to-center displacement: boxing's dodge is far tighter.
    */
-  update(snapshot: PoseSnapshot, laneZone: -1 | 0 | 1): CalibrationProfile | undefined {
+  update(snapshot: PoseSnapshot, laneZone: -1 | 0 | 1, centerBandSw = EXIT_LANE_SW): CalibrationProfile | undefined {
+    this.centerBandSw = centerBandSw;
     const now = snapshot.timestampMs;
     this.laneZone = laneZone;
     const core = this.extractCore(snapshot);
@@ -171,32 +174,36 @@ export class AdaptiveCalibrator {
   private extractCore(snapshot: PoseSnapshot): CoreObservation | undefined {
     const image = snapshot.landmarks;
     const world = snapshot.worldLandmarks;
-    const imageCore = CORE.map((index) => image[index]);
-    const worldCore = CORE.map((index) => world[index]);
-    if (!imageCore.every(confident) || !worldCore.every(confident)) return undefined;
+    const imageShoulders = UPPER_CORE.map((index) => image[index]);
+    const worldShoulders = UPPER_CORE.map((index) => world[index]);
+    if (!imageShoulders.every(confident) || !worldShoulders.every(confident)) return undefined;
 
     const leftShoulder = image[11]!;
     const rightShoulder = image[12]!;
-    const leftHip = image[23]!;
-    const rightHip = image[24]!;
+    const leftHip = image[23];
+    const rightHip = image[24];
     const worldLeftShoulder = world[11]!;
     const worldRightShoulder = world[12]!;
-    const worldLeftHip = world[23]!;
-    const worldRightHip = world[24]!;
-    const shoulderCenter = midpoint(leftShoulder, rightShoulder);
-    const hipCenter = midpoint(leftHip, rightHip);
-    const torsoHeight = Math.abs(hipCenter.y - shoulderCenter.y);
+    const worldLeftHip = world[23];
+    const worldRightHip = world[24];
     const aspect = snapshot.frameHeight / snapshot.frameWidth;
     const imageShoulderWidth = Math.hypot(leftShoulder.x - rightShoulder.x, (leftShoulder.y - rightShoulder.y) * aspect);
     const shoulderWidth = distance3(worldLeftShoulder, worldRightShoulder);
-    if (torsoHeight < 0.03 || imageShoulderWidth < 0.03 || shoulderWidth < 0.03) return undefined;
+    if (imageShoulderWidth < 0.03 || shoulderWidth < 0.03) return undefined;
+    if (confident(leftHip) && confident(rightHip)) {
+      const shoulderCenter = midpoint(leftShoulder, rightShoulder);
+      const hipCenter = midpoint(leftHip, rightHip);
+      if (Math.abs(hipCenter.y - shoulderCenter.y) < 0.03) return undefined;
+    }
+
+    const corePoints: Point3[] = [worldLeftShoulder, worldRightShoulder, leftShoulder, rightShoulder];
+    if (confident(worldLeftHip) && confident(worldRightHip) && confident(leftHip) && confident(rightHip)) {
+      corePoints.push(worldLeftHip, worldRightHip, leftHip, rightHip);
+    }
 
     return {
       timestampMs: snapshot.timestampMs,
-      confidence: landmarkConfidence(
-        worldLeftShoulder, worldRightShoulder, worldLeftHip, worldRightHip,
-        leftShoulder, rightShoulder, leftHip, rightHip,
-      ),
+      confidence: landmarkConfidence(...corePoints),
       shoulderWidth,
       shoulderCenterX: (leftShoulder.x + rightShoulder.x) / 2,
       imageShoulderWidth,
@@ -292,7 +299,7 @@ export class AdaptiveCalibrator {
     // it is the player's stance when the zone is center — no lane was ever entered to hold.
     // Zone-center evidence is therefore admitted at any deviation: transitory dodge frames leak
     // in, but they are brief and symmetric while stance is sustained, and the mode is consensus.
-    const isPosture = (deviationSw: number, laneZone: number) => deviationSw < EXIT_LANE_SW || laneZone === 0;
+    const isPosture = (deviationSw: number, laneZone: number) => deviationSw < this.centerBandSw || laneZone === 0;
     const admitted = deviations.filter(({ sample, deviationSw }) => isPosture(deviationSw, sample.laneZone)).length;
     // Escape hatch: if almost nothing counts as neutral evidence for a long stretch, the player
     // is not holding a lane — nobody holds one for half a minute — they physically moved, and

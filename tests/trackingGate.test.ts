@@ -77,6 +77,14 @@ describe('TrackingGate', () => {
     expect(gate.evaluate(good(1066)).state).toBe('tracked');
   });
 
+  it('maintains tracked state through motion-blur dips above the 0.35 stay floor (dual-threshold hysteresis)', () => {
+    const gate = new TrackingGate();
+    [0, 33, 66].forEach((time) => { gate.evaluate(pose(time, { confidence: 0.55 })); });
+    expect(gate.evaluate(pose(99, { confidence: 0.42 })).state).toBe('tracked');
+    expect(gate.evaluate(pose(132, { confidence: 0.36 })).state).toBe('tracked');
+    expect(gate.evaluate(pose(165, { confidence: 0.34 })).state).toBe('degraded');
+  });
+
   it('resets to the initial state', () => {
     const gate = new TrackingGate();
     [0, 33, 66].forEach((time) => { gate.evaluate(good(time)); });

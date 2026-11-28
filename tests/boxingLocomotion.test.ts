@@ -185,10 +185,16 @@ describe('boxing locomotion through ActionPipeline', () => {
   });
 
   it('keeps depth frozen from a punch onset that never confirms until the timeout', () => {
-    // The arm only half extends, and the body looks smaller from the first frame of the punch.
+    // The arm only half extends, and the body starts looking smaller one frame into the punch
+    // (an instant 30% shrink is outside the physical envelope — it reads as reference-frame
+    // motion to the shoulder-drop veto — so the resize no longer lands exactly on the onset).
     const { trace, events } = drive((t) => {
-      const arm = rightArm(pose(t), 0.5 * Math.min(1, Math.max(0, (t - 300) / 150)));
-      return t >= 363 ? resized(arm, 0.7) : arm;
+      // A fast partial twitch: quick enough to onset, but it stops at a third of the reach so
+      // neither the travel nor the extension bar is ever met — the unconfirmed window the
+      // scenario needs. (A slow half-extension used to fail on the old geometric cosine bar;
+      // at the production-geometry bar that movement is honestly a punch.)
+      const arm = rightArm(pose(t), 0.35 * Math.min(1, Math.max(0, (t - 300) / 100)));
+      return t >= 396 ? resized(arm, 0.7) : arm;
     }, 1500);
     const onset = events.find((event) => event.type === 'punch-start')!;
     expect(onset.timestampMs).toBeLessThanOrEqual(363);
@@ -201,7 +207,7 @@ describe('boxing locomotion through ActionPipeline', () => {
 
   it('forgets the trackers on reset', () => {
     const { pipeline } = drive((t) => resized(pose(t), t < 300 ? 1 : 1.3), 1500);
-    pipeline.reset();
+    pipeline.reset(1533);
     let controls: ContinuousControls | undefined;
     for (let time = 1533; time <= 1700; time += 33) controls = pipeline.update(pose(time), profile()).controls;
     expect(controls).toMatchObject({ ringDepthMove: 0, ringDepth01: 0, lateralDash: 0 });

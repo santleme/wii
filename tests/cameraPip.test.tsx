@@ -7,51 +7,6 @@ import { CameraPip } from '../src/ui/CameraPip';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe('CameraPip', () => {
-  it('keeps the video element mounted while the PiP is hidden', async () => {
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    const videoRef = createRef<HTMLVideoElement>();
-    const props = {
-      videoRef,
-      canvasRef: createRef<HTMLCanvasElement>(),
-      status: '',
-      tracking: 'TRACKING',
-      onStart: () => {},
-      onStop: () => {},
-    };
-
-    await act(async () => {
-      root.render(<CameraPip {...props} cameraOn />);
-    });
-    const video = videoRef.current;
-    expect(video).not.toBeNull();
-    expect(video!.isConnected).toBe(true);
-
-    await act(async () => {
-      root.render(<CameraPip {...props} cameraOn hidden />);
-    });
-    const pip = container.querySelector('aside')!;
-    expect(pip.hidden).toBe(false);
-    expect(pip.className).toContain('is-hidden');
-    expect(pip.getAttribute('aria-hidden')).toBe('true');
-    expect(pip.hasAttribute('inert')).toBe(true);
-    expect(videoRef.current).toBe(video);
-    expect(video!.isConnected).toBe(true);
-
-    await act(async () => {
-      root.render(<CameraPip {...props} cameraOn />);
-    });
-    expect(container.querySelector('aside')!.hidden).toBe(false);
-    expect(container.querySelector('aside')!.className).not.toContain('is-hidden');
-    expect(videoRef.current).toBe(video);
-
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
-  });
-
   it('collapses when the camera turns off and stays collapsed when it returns', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

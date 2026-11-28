@@ -1,8 +1,9 @@
 import { Link } from 'react-router-dom';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import ProductAsciiArt from '../components/ProductAsciiArt';
+import CrystalAsciiField from '../components/CrystalAsciiField';
 import { paperLines, papers, type Paper } from '../data/papers';
 import { useLang } from '../i18n';
+import { orbitRadii } from './papersOrbit';
 
 const LINE_MS = 4800;
 
@@ -32,13 +33,17 @@ export default function PapersPage() {
     if (!ring) return;
     const cards = Array.from(ring.children) as HTMLElement[];
     const front = cards.map(() => false);
+    const compact = window.matchMedia('(max-width: 480px)');
     let rx = 0;
     let ry = 0;
     const measure = () => {
-      const cw = cards[0]?.offsetWidth ?? 0;
-      const ch = cards[0]?.offsetHeight ?? 0;
-      rx = Math.max(0, ring.clientWidth / 2 - cw / 2 - 8);
-      ry = Math.max(0, ring.clientHeight / 2 - ch / 2 - 8);
+      let maxWidth = 0;
+      let maxHeight = 0;
+      for (const card of cards) {
+        maxWidth = Math.max(maxWidth, card.offsetWidth);
+        maxHeight = Math.max(maxHeight, card.offsetHeight);
+      }
+      ({ x: rx, y: ry } = orbitRadii(ring.clientWidth, ring.clientHeight, maxWidth, maxHeight));
     };
     let angle = -Math.PI / 2;
     let speed = 0.09; // rad/s
@@ -48,6 +53,7 @@ export default function PapersPage() {
     const TAU = Math.PI * 2;
     // Gira pelo menor caminho ate o cartao i chegar na frente (parte de baixo da elipse), depois chama done.
     const rotateTo = (i: number, done: () => void) => {
+      if (compact.matches) { done(); return; }
       if (reduce.current) {
         angle = Math.PI / 2 - (i / cards.length) * TAU;
         place();
@@ -63,11 +69,21 @@ export default function PapersPage() {
     rotateRef.current = rotateTo;
     const place = () => {
       cards.forEach((el, i) => {
+        if (compact.matches) {
+          // Keep the title clear: two cards above, two below, and one at the bottom.
+          const x = i === 4 ? 0 : (i % 2 === 0 ? -1 : 1) * rx;
+          const y = i < 2 ? -ry : i < 4 ? ry * 0.35 : ry;
+          el.style.transform = `translate3d(calc(-50% + ${x.toFixed(2)}px), calc(-50% + ${y.toFixed(2)}px), 0)`;
+          el.style.opacity = '1';
+          el.style.zIndex = '5';
+          front[i] = false;
+          return;
+        }
         const a = angle + (i / cards.length) * Math.PI * 2;
         const depth = (Math.sin(a) + 1) / 2; // 1 = frente (parte de baixo da elipse)
-        const scale = 0.6 + 0.4 * depth;
+        const scale = 0.84 + 0.16 * depth;
         el.style.transform = `translate3d(calc(-50% + ${(Math.cos(a) * rx).toFixed(2)}px), calc(-50% + ${(Math.sin(a) * ry).toFixed(2)}px), 0) scale(${scale.toFixed(4)})`;
-        el.style.opacity = (0.3 + 0.7 * depth).toFixed(3);
+        el.style.opacity = (0.88 + 0.12 * depth).toFixed(3);
         const f = depth > 0.62; // atras do titulo; na frente dele so quando passa por baixo
         if (f !== front[i]) { front[i] = f; el.style.zIndex = f ? '30' : '5'; }
       });
@@ -99,11 +115,15 @@ export default function PapersPage() {
     measure();
     place();
     const ro = new ResizeObserver(() => { measure(); place(); });
+    const onCompactChange = () => { measure(); place(); };
+    compact.addEventListener('change', onCompactChange);
     ro.observe(ring);
+    for (const card of cards) ro.observe(card);
     if (!reduce.current) raf = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      compact.removeEventListener('change', onCompactChange);
       rotateRef.current = null;
     };
   }, []);
@@ -139,7 +159,7 @@ export default function PapersPage() {
 
   return (
     <main className={`papers${open ? ' has-open' : ''}`} id="page-content">
-      <ProductAsciiArt src="/images/papers/macaco-cientista.png" className="papers-ascii-bg" decorative richLight />
+      <CrystalAsciiField />
       {/* biome-ignore lint/a11y/useSemanticElements: The orbit cards are an interactive carousel, not form fields. */}
       <div
         className="papers-orbit product-emerge"
@@ -154,17 +174,18 @@ export default function PapersPage() {
         {papers.map((p) => {
           const c = copyOf(p);
           return (
-            <button
-              key={p.n}
-              type="button"
-              className={`papers-card${open?.n === p.n ? ' is-open' : ''}`}
-              aria-label={tr(`Artigo ${p.n}: ${c.short}`, `Paper ${p.n}: ${c.short}`)}
-              aria-expanded={open?.n === p.n}
-              onClick={() => pick(p)}
-            >
-              <span className="papers-card-n">{p.n}</span>
-              <span className="papers-card-name">{c.short}</span>
-            </button>
+            <div className="papers-orbit-item" key={p.n}>
+              <button
+                type="button"
+                className={`papers-card${open?.n === p.n ? ' is-open' : ''}`}
+                aria-label={tr(`Artigo ${p.n}: ${c.short}`, `Paper ${p.n}: ${c.short}`)}
+                aria-expanded={open?.n === p.n}
+                onClick={() => pick(p)}
+              >
+                <span className="papers-card-n">{p.n}</span>
+                <span className="papers-card-name">{c.short}</span>
+              </button>
+            </div>
           );
         })}
       </div>

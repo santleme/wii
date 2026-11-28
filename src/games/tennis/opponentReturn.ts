@@ -1,4 +1,4 @@
-import { advanceBall, createBall, solveOutgoing, type BallState } from './ballistics';
+import { advanceBall, createBall, solveOverNet, type BallState } from './ballistics';
 
 export interface OpponentHitPlan {
   readonly fromBall: BallState;
@@ -19,7 +19,7 @@ export function resolveScheduledOpponentReturn(
   flightTimeSeconds: number,
 ): BallState {
   const contactBall = ballAtPlannedContact(plan);
-  const velocity = solveOutgoing(contactBall.position, target, flightTimeSeconds);
+  const velocity = solveOverNet(contactBall.position, target, flightTimeSeconds);
   const elapsedAfterContact = Math.max(0, (nowMs - plan.hitAtMs) / 1000);
   return advanceBall(createBall(contactBall.position, velocity, 'opponent'), elapsedAfterContact);
 }

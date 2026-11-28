@@ -1,4 +1,4 @@
-import type { Point3 } from '../cv/protocol';
+import type { Point3 } from '@wii/spatial-core';
 import { midpoint } from './math';
 
 const EPSILON = 1e-6;
@@ -33,20 +33,31 @@ export interface BodyBasis {
 
 /**
  * Orthonormal body frame: shoulder-line side, torso up orthogonalized against it, depth as
- * their cross product. Undefined when the shoulder line or the torso direction is degenerate.
+ * their cross product. When hips are cropped by a close webcam frame or occluded by arm swing,
+ * falls back to the gravity/camera vertical axis ({ x: 0, y: -1, z: 0 }) orthogonalized against
+ * the shoulder line so upper-body tracking remains continuous.
  */
 export function bodyBasis(
   leftShoulder: Point3,
   rightShoulder: Point3,
-  leftHip: Point3,
-  rightHip: Point3,
+  leftHip?: Point3,
+  rightHip?: Point3,
 ): BodyBasis | undefined {
   const side = normalize(subtract(rightShoulder, leftShoulder));
   if (!side) return undefined;
 
   const shoulders = midpoint(leftShoulder, rightShoulder);
-  const hips = midpoint(leftHip, rightHip);
-  const torso = subtract(shoulders, hips);
+  const hipsVisible = Boolean(
+    leftHip
+    && rightHip
+    && Number.isFinite(leftHip.x) && Number.isFinite(leftHip.y) && Number.isFinite(leftHip.z)
+    && Number.isFinite(rightHip.x) && Number.isFinite(rightHip.y) && Number.isFinite(rightHip.z)
+    && (leftHip.visibility ?? leftHip.presence ?? 1) >= 0.35
+    && (rightHip.visibility ?? rightHip.presence ?? 1) >= 0.35,
+  );
+  const torso = hipsVisible && leftHip && rightHip
+    ? subtract(shoulders, midpoint(leftHip, rightHip))
+    : { x: 0, y: -1, z: 0 };
   const torsoProjection = dot(torso, side);
   const up = normalize({
     x: torso.x - side.x * torsoProjection,
@@ -64,8 +75,8 @@ export function bodyLocalPoint(
   shoulder: Point3,
   leftShoulder: Point3,
   rightShoulder: Point3,
-  leftHip: Point3,
-  rightHip: Point3,
+  leftHip: Point3 | undefined,
+  rightHip: Point3 | undefined,
   scale: number,
 ): Point3 | undefined {
   if (!Number.isFinite(scale) || scale <= EPSILON) return undefined;

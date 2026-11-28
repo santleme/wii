@@ -4,14 +4,17 @@ import type { ProceduralAudio } from '../audio';
 import { GameLoop } from '../core/GameLoop';
 import type { GameHudState, HudFeedback } from '../core/hud';
 import { RunGate, type RunPhase } from '../track/runGate';
+import { PUNCH_THRESHOLDS } from '../../kinematics/punchDetector';
 import { applyLatePunch, applyOpponentPunch, applyPlayerPunch, createBoxing, MAX_HP, ROUND_COUNT, tickRound, type BoxingState } from './boxingRules';
 import type { BoxingMode } from './boxingModes';
+import { LEARNING_PUNCH_TRAVEL, BoxingTutorial } from './boxingTutorial';
+import { RestartGesture } from '../core/restartGesture';
 import { createImpactSparkPool, type ImpactEffectKind, type ImpactSparkPool } from './impactEffects';
 import { createFirstPersonGloves, createMiiBoxer, type FirstPersonGloves, type MiiBoxer, type MiiBoxerFootwork, type MiiBoxerState } from './miiBoxer';
 import {
   createOpponentAi,
   IMPACT_GRACE_MS,
-  isDodged,
+  isDodgedTyped,
   MAX_PUNCH_LOOKBACK_MS,
   type OpponentAiState,
   type OpponentAttack,
@@ -23,6 +26,7 @@ import { opponentProfile, type OpponentProfile, type OpponentProfileId } from '.
 import { createPunchingBag, type PunchingBag } from './punchingBag';
 import {
   createOpponentMotion,
+  evadedByFootwork,
   inPunchRange,
   moveAround,
   OPPONENT_START,
@@ -116,12 +120,18 @@ const HANDS = ['left', 'right'] as const;
 
 export interface BoxingGameOptions {
   mode?: BoxingMode;
+  holdResult?: boolean;
   opponent?: OpponentProfileId;
   /**
    * Randomness for the opponent's footwork, kept apart from the AI's `rng` so player punches never
    * shift the attack sequence. Defaults to no random footwork (the opponent never dashes).
    */
   motionRng?: () => number;
+  /**
+   * Reports how much forward travel a punch needs to confirm — generous while teaching,
+   * adapted to the measured player once the warm-up ends, exactly like the tennis one.
+   */
+  onPunchTravel?: (travel: number) => void;
 }
 
 export interface BoxingScoreboard {
@@ -133,6 +143,7 @@ export interface BoxingScoreboard {
   secondsLeft: number;
   /** Present before the first bell and after a terminal fight/training result. */
   selectionOpen?: boolean;
+  winner?: 'player' | 'opponent' | 'draw';
   training?: BoxingTrainingScoreboard;
 }
 
@@ -150,6 +161,17 @@ export interface BoxingTrainingScoreboard {
 
 export type BoxingHudState = GameHudState & { banner?: { title: string; detail?: string }; boxing: BoxingScoreboard };
 
+interface QueuedPunch {
+  hand: Hand; power01: number; atMs: number; onsetMs: number;
+  kind: 'unknown' | 'straight' | 'hook' | 'uppercut'; target: 'unknown' | 'head' | 'body';
+}
+
+interface PendingImpact {
+  untilMs: number;
+  attack?: OpponentAttack;
+  punches: QueuedPunch[];
+}
+
 export class BoxingGame {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(55, 1, 0.1, 80);
@@ -162,6 +184,7 @@ export class BoxingGame {
   private readonly hudTimer: number;
   private readonly gate = new RunGate();
   private readonly mode: BoxingMode;
+  private readonly holdResult: boolean;
   private readonly motionRng: () => number;
   private readonly profile: OpponentProfile;
 
@@ -169,6 +192,10 @@ export class BoxingGame {
   private ai: OpponentAiState;
   private bagTrainer: PunchingBagTrainer | undefined;
   private dodgeChallenge: DodgeChallenge | undefined;
+  private tutorial: BoxingTutorial | undefined;
+  /** Guards against re-applying the same tutorial's adapted travel every tick. */
+  private travelAdapted = false;
+  private readonly skipGesture = new RestartGesture();
   private fightMs = 0;
   private animTimeS = 0;
   /** Wall time the fight last (re)started; punches peaking before it belong to a frozen fight. */
@@ -176,6 +203,10 @@ export class BoxingGame {
   private lastPhase: RunPhase = 'countdown';
   /** Wall time of the last bell, until the next exchange starts. */
   private roundEndedWallMs: number | undefined;
+  /** The round has ended, but a pre-bell impact still needs its pose-latency window. */
+  private pendingBell: (PendingImpact & { atFightMs: number; remainingRoundMs: number }) | undefined;
+  /** An impact remains provisional while earlier player punches can still arrive. */
+  private pendingImpact: PendingImpact | undefined;
   private breakMsLeft = 0;
   private restartMsLeft = 0;
   private zone: Zone = 0;
@@ -202,9 +233,33 @@ export class BoxingGame {
   /** The punch key alternates arms, so two taps are a one-two. */
   private nextKeyHand: Hand = 'right';
   private cameraGuard = false;
+  private cameraDuck = false;
+  /** Validity is distinct from false: an occluded hand does not describe the player. */
+  private cameraGuardValid = false;
+  private cameraDuckValid = false;
+  private cameraZoneValid = false;
+  private cameraTracking = false;
+  private cameraMissing = false;
+  private trackingAtMs = Number.NEGATIVE_INFINITY;
+  private cameraSeen = false;
+  /** Reject pose frames captured before the most recent loss or reset. */
+  private cameraInvalidatedAtMs = Number.NEGATIVE_INFINITY;
+  private cameraGuardAtMs = Number.NEGATIVE_INFINITY;
+  private cameraDuckAtMs = Number.NEGATIVE_INFINITY;
+  private cameraZoneAtMs = Number.NEGATIVE_INFINITY;
+  private cameraDepthAtMs = Number.NEGATIVE_INFINITY;
+  private cameraDepthSpeedAtMs = Number.NEGATIVE_INFINITY;
+  private requiresFreshZone = false;
+  private perceptionEpochMs = Number.NEGATIVE_INFINITY;
+  /** Only valid observed defenses enter this bounded, match-local history. */
+  private readonly defenseHistory: { slipped: boolean; ducked: boolean }[] = [];
   /** Fight-time bounds of the open counter window, if any. */
   private counter: { fromMs: number; untilMs: number } | undefined;
-  private zoneHistory: { atMs: number; zone: Zone; guarded: boolean; inRange: boolean }[] = [];
+  private zoneHistory: {
+    atMs: number; zone: Zone; guarded: boolean; ducked: boolean; inRange: boolean;
+    playerPos: RingPosition; opponentPos: RingPosition; playerPunching: boolean; guardKnown: boolean; zoneKnown: boolean; duckKnown: boolean;
+  }[] = [];
+  private readonly seenPunchStartIds = new Set<number>();
   private punchAnimS: Record<Hand, number> = { left: PUNCH_ANIM_S, right: PUNCH_ANIM_S };
   private opponentHitS = 0;
   private hitShakeS = 0;
@@ -217,9 +272,10 @@ export class BoxingGame {
     private readonly onHud: (state: BoxingHudState) => void,
     private readonly audio?: ProceduralAudio,
     private readonly rng: () => number = Math.random,
-    options: BoxingGameOptions = {},
+    private readonly options: BoxingGameOptions = {},
   ) {
     this.mode = options.mode ?? 'fight';
+    this.holdResult = options.holdResult ?? false;
     this.motionRng = options.motionRng ?? (() => 0);
     this.profile = opponentProfile(options.opponent);
     this.status = this.initialStatus();
@@ -247,6 +303,10 @@ export class BoxingGame {
       this.bag = undefined;
     }
     if (this.mode === 'dodge') this.dodgeChallenge = new DodgeChallenge();
+    if (this.mode === 'tutorial') {
+      this.tutorial = new BoxingTutorial();
+      this.options.onPunchTravel?.(LEARNING_PUNCH_TRAVEL);
+    }
 
     this.placeFighters(1);
     this.gloves = createFirstPersonGloves();
@@ -266,13 +326,44 @@ export class BoxingGame {
   // ---------------------------------------------------------------- input
 
   setTracking(tracking: string): void {
-    this.gate.setTracking(tracking);
-    this.syncPhase();
+    this.applyTracking(tracking);
     this.publishHud();
   }
 
+  /** Pose callbacks carry capture time, avoiding React-effect reordering. */
+  setPoseTracking(tracking: string, atMs: number): void {
+    if (!Number.isFinite(atMs) || atMs <= this.trackingAtMs) return;
+    this.trackingAtMs = atMs;
+    this.applyTracking(tracking, atMs);
+  }
+
+  private applyTracking(tracking: string, atMs?: number): void {
+    this.cameraTracking = tracking === 'TRACKING' || tracking.startsWith('TRACKING · ');
+    if (this.cameraTracking) this.cameraSeen = true;
+    if (tracking === 'SEM POSE') {
+      if (!this.cameraMissing) {
+        this.cameraInvalidatedAtMs = atMs ?? performance.now();
+        this.perceptionEpochMs = this.fightMs;
+        this.requiresFreshZone = true;
+      }
+      this.cameraDepth = 0;
+      this.cameraDepthSpeed = undefined;
+      this.cameraMissing = true;
+      this.cameraGuardValid = this.cameraDuckValid = this.cameraZoneValid = false;
+      this.cameraGuardAtMs = this.cameraDuckAtMs = this.cameraZoneAtMs = this.cameraDepthAtMs = this.cameraDepthSpeedAtMs = Number.NEGATIVE_INFINITY;
+    } else {
+      this.cameraMissing = false;
+    }
+    this.gate.setTracking(tracking);
+    this.syncPhase();
+  }
+
   /** Same authority rule as the track: a changed body zone applies absolutely, keys hold until then. */
-  setLaneZone(zone: Zone | undefined): void {
+  setDodgeZone(zone: Zone | undefined, _atMs?: number | null): void {
+    if (typeof _atMs === 'number' && (_atMs <= this.cameraInvalidatedAtMs || _atMs < this.cameraZoneAtMs)) return;
+    this.cameraZoneAtMs = typeof _atMs === 'number' ? _atMs : performance.now();
+    this.cameraZoneValid = zone !== undefined && _atMs !== null;
+    if (this.cameraZoneValid) this.requiresFreshZone = false;
     this.lean = zone ?? 0;
     if (zone === undefined) return;
     if (zone !== this.cameraZone) this.zone = zone;
@@ -281,22 +372,43 @@ export class BoxingGame {
 
   resetLaneZone(): void {
     this.cameraZone = undefined;
+    this.cameraZoneValid = false;
     this.lean = 0;
   }
 
   /** Unlike the lane, a guard never latches: a camera with no opinion is not guarding. */
-  setGuard(guard: boolean | undefined): void {
+  setGuard(guard: boolean | undefined, _atMs?: number | null): void {
+    if (typeof _atMs === 'number' && (_atMs <= this.cameraInvalidatedAtMs || _atMs < this.cameraGuardAtMs)) return;
+    this.cameraGuardAtMs = typeof _atMs === 'number' ? _atMs : performance.now();
+    this.cameraGuardValid = guard !== undefined && _atMs !== null;
     this.cameraGuard = guard === true;
   }
 
+  /** Like the guard, a duck never latches: a camera with no opinion is not ducking. */
+  setDuck(ducked: boolean | undefined, _atMs?: number | null): void {
+    if (typeof _atMs === 'number' && (_atMs <= this.cameraInvalidatedAtMs || _atMs < this.cameraDuckAtMs)) return;
+    this.cameraDuckAtMs = typeof _atMs === 'number' ? _atMs : performance.now();
+    this.cameraDuckValid = ducked !== undefined && _atMs !== null;
+    this.cameraDuck = ducked === true;
+  }
+
+  /** Feeds the tutorial skip gesture; outside the tutorial the boxing game has no use for it. */
+  setHandsRaised(raised: boolean, atMs: number | null): void {
+    this.skipGesture.setHandsRaised(raised, atMs);
+  }
+
   /** Like the guard, footwork never latches: no opinion means standing still. */
-  setDepthMove(move: -1 | 0 | 1 | undefined): void {
-    this.cameraDepth = move ?? 0;
+  setDepthMove(move: -1 | 0 | 1 | undefined, _atMs?: number | null): void {
+    if (typeof _atMs === 'number' && (_atMs <= this.cameraInvalidatedAtMs || _atMs < this.cameraDepthAtMs)) return;
+    this.cameraDepthAtMs = typeof _atMs === 'number' ? _atMs : performance.now();
+    this.cameraDepth = _atMs === null ? 0 : (move ?? 0);
   }
 
   /** Continuous footwork, -1..1 toward the opponent; it overrides the depth step while defined. */
-  setDepthSpeed(speed: number | undefined): void {
-    this.cameraDepthSpeed = speed !== undefined && Number.isFinite(speed) ? clampUnit(speed) : undefined;
+  setDepthSpeed(speed: number | undefined, _atMs?: number | null): void {
+    if (typeof _atMs === 'number' && (_atMs <= this.cameraInvalidatedAtMs || _atMs < this.cameraDepthSpeedAtMs)) return;
+    this.cameraDepthSpeedAtMs = typeof _atMs === 'number' ? _atMs : performance.now();
+    this.cameraDepthSpeed = _atMs !== null && speed !== undefined && Number.isFinite(speed) ? clampUnit(speed) : undefined;
   }
 
   /** A body hop sidesteps once when it appears; holding the value does nothing more. */
@@ -321,7 +433,10 @@ export class BoxingGame {
   onAction(event: SportActionEvent): void {
     if (event.type !== 'punch-start' && event.type !== 'punch') return;
     if (event.type === 'punch-start') {
-      if (this.punchingActive() || (this.mode === 'dodge' && this.trainingActive())) {
+      if (event.timestampMs < this.runningSinceWallMs || performance.now() - event.timestampMs > MAX_PUNCH_LOOKBACK_MS || this.seenPunchStartIds.has(event.id)) return;
+      if (this.punchingActive() || (this.mode === 'dodge' && this.trainingActive()) || (this.mode === 'tutorial' && this.gate.phase === 'running')) {
+        this.seenPunchStartIds.add(event.id);
+        if (this.seenPunchStartIds.size > 128) this.seenPunchStartIds.delete(this.seenPunchStartIds.values().next().value!);
         this.punchAnimS[event.hand] = 0;
         this.audio?.whoosh(0.55);
       }
@@ -334,19 +449,52 @@ export class BoxingGame {
       return;
     }
     if (this.mode === 'dodge') return;
+    if (this.mode === 'tutorial') {
+      const tutorial = this.tutorial;
+      if (!tutorial || tutorial.done || this.gate.phase !== 'running' || this.restartMsLeft > 0) return;
+      if (event.type === 'punch' && event.punchKind && event.punchKind !== 'unknown') {
+        const advanced = tutorial.punch({
+          hand: event.hand,
+          kind: event.punchKind,
+          target: event.punchTargetZone ?? 'unknown',
+          travelSw: event.measurement?.forwardTravel,
+        });
+        this.setFeedback(advanced ? 'ISSO!' : 'TENTE DE NOVO', advanced ? 'good' : 'neutral');
+        if (advanced) this.audio?.punchImpact(0.3 + 0.4 * event.power01, false);
+      }
+      return;
+    }
 
     if (event.peakTimestampMs < this.runningSinceWallMs) return;
     if (this.fighting()) {
-      const ageMs = Math.min(MAX_PUNCH_LOOKBACK_MS, Math.max(0, performance.now() - event.peakTimestampMs));
-      this.landPunch(event.hand, event.power01, this.fightMs - ageMs);
+      const ageMs = Math.max(0, performance.now() - event.peakTimestampMs);
+      if (ageMs > MAX_PUNCH_LOOKBACK_MS) return;
+      const hit: QueuedPunch = {
+        hand: event.hand, power01: event.power01, atMs: this.fightMs - ageMs,
+        onsetMs: this.fightMs - Math.max(0, performance.now() - event.onsetTimestampMs),
+        kind: event.punchKind ?? 'unknown', target: event.punchTargetZone ?? 'unknown',
+      };
+      if (this.pendingImpact) this.pendingImpact.punches.push(hit);
+      else this.landPunch(hit.hand, hit.power01, hit.atMs, applyPlayerPunch, hit.kind, hit.target, hit.onsetMs);
       return;
     }
     // Confirmation lags the peak: a punch that peaked before the bell still counts. The fight
     // clock has been frozen since the bell, so its age is measured back from there.
     if (this.gate.phase !== 'running' || this.roundEndedWallMs === undefined) return;
     const beforeBellMs = this.roundEndedWallMs - event.peakTimestampMs;
-    if (beforeBellMs < 0 || beforeBellMs > MAX_PUNCH_LOOKBACK_MS) return;
-    this.landPunch(event.hand, event.power01, this.fightMs - beforeBellMs, applyLatePunch);
+    if (beforeBellMs < 0 || beforeBellMs > MAX_PUNCH_LOOKBACK_MS
+      || performance.now() - this.roundEndedWallMs > MAX_PUNCH_LOOKBACK_MS
+      || performance.now() - event.peakTimestampMs > MAX_PUNCH_LOOKBACK_MS) return;
+    const bellFightMs = this.pendingBell?.atFightMs ?? this.fightMs;
+    const atMs = bellFightMs - beforeBellMs;
+    const onsetMs = bellFightMs - Math.max(0, this.roundEndedWallMs - event.onsetTimestampMs);
+    const kind = event.punchKind ?? 'unknown';
+    const target = event.punchTargetZone ?? 'unknown';
+    if (this.pendingBell) {
+      this.pendingBell.punches.push({ hand: event.hand, power01: event.power01, atMs, onsetMs, kind, target });
+    } else {
+      this.landPunch(event.hand, event.power01, atMs, applyLatePunch, kind, target, onsetMs);
+    }
   }
 
   onKey(key: string): void {
@@ -359,6 +507,8 @@ export class BoxingGame {
     if (guard) this.keyGuard = true;
     if (footwork) this.moveKeys.add(pressed);
     if (this.gate.resumeByKey()) {
+      this.cameraSeen = false;
+      this.requiresFreshZone = false;
       this.syncPhase();
       return;
     }
@@ -381,7 +531,7 @@ export class BoxingGame {
   }
 
   private fighting(): boolean {
-    return this.mode === 'fight' && this.gate.phase === 'running' && this.breakMsLeft <= 0 && !this.match.winner;
+    return this.mode === 'fight' && this.gate.phase === 'running' && this.breakMsLeft <= 0 && !this.match.winner && !this.pendingBell;
   }
 
   private trainingActive(): boolean {
@@ -395,15 +545,21 @@ export class BoxingGame {
     return this.mode === 'fight' ? this.fighting() : this.mode === 'bag' && this.trainingActive();
   }
 
-  private landPunch(hand: Hand, power01: number, atMs: number, apply = applyPlayerPunch): void {
+  private landPunch(hand: Hand, power01: number, atMs: number, apply = applyPlayerPunch, kind: 'unknown' | 'straight' | 'hook' | 'uppercut' = 'unknown', target: 'unknown' | 'head' | 'body' = 'unknown', onsetMs = atMs): void {
     const sample = [...this.zoneHistory].reverse().find((entry) => entry.atMs <= atMs);
     if (!(sample?.inRange ?? inPunchRange(this.playerPos, this.opponentPos))) {
       this.setFeedback('LONGE DEMAIS', 'neutral');
       return;
     }
+    const onset = [...this.zoneHistory].reverse().find((entry) => entry.atMs <= onsetMs);
+    if (onset && sample && onset.atMs < sample.atMs && evadedByFootwork(onset.playerPos, onset.opponentPos, sample.opponentPos)) {
+      this.setFeedback('ADVERSÁRIO ESQUIVOU', 'neutral');
+      this.audio?.whoosh(0.6);
+      return;
+    }
     const decided = this.match.winner;
     const counter = this.counter !== undefined && atMs >= this.counter.fromMs && atMs <= this.counter.untilMs;
-    const result = apply(this.match, power01, openingAt(this.ai, atMs), counter);
+    const result = apply(this.match, power01, openingAt(this.ai, atMs), counter, kind, target);
     this.match = result.state;
     const blocked = result.damage === 0;
     this.spawnOpponentImpact(power01, blocked ? 'block' : 'hit');
@@ -453,6 +609,14 @@ export class BoxingGame {
   private syncPhase(): void {
     const { phase } = this.gate;
     if (phase === 'running' && this.lastPhase !== 'running') this.runningSinceWallMs = performance.now();
+    if (phase === 'paused' && this.lastPhase !== 'paused') {
+      this.zoneHistory = [];
+      this.cameraGuardValid = this.cameraDuckValid = this.cameraZoneValid = false;
+      this.cameraInvalidatedAtMs = performance.now();
+      this.perceptionEpochMs = this.fightMs;
+      this.requiresFreshZone = true;
+      this.opponentMotion = { ...this.opponentMotion, sawPunch: false };
+    }
     this.lastPhase = phase;
   }
 
@@ -495,6 +659,10 @@ export class BoxingGame {
       this.stepDodge(dtMs);
       return;
     }
+    if (this.mode === 'tutorial') {
+      this.stepTutorial(dtMs);
+      return;
+    }
     this.stepFight(dtMs);
   }
 
@@ -526,11 +694,49 @@ export class BoxingGame {
     this.applyDodgeEvents(challenge.advance(dtMs / 1000, this.trainingLaneZone()));
   }
 
+  /** The opponent holds its guard and never attacks: the tutorial is a warm-up, not a fight. */
+  private stepTutorial(dtMs: number): void {
+    const tutorial = this.tutorial;
+    if (!tutorial) return;
+    if (tutorial.done) {
+      this.restartMsLeft -= dtMs;
+      if (this.restartMsLeft <= 0) this.resetTraining();
+      return;
+    }
+    this.fightMs += dtMs;
+    this.movePlayer(dtMs);
+    tutorial.tick({
+      dtS: dtMs / 1000,
+      seen: true,
+      guard: this.guarding(),
+      zone: this.zone,
+      ducked: this.cameraDuck,
+    });
+    const { title, detail } = tutorial.text;
+    this.status = tutorial.done ? 'Tutorial completo!' : `${title} — ${detail}`;
+    // Holding both hands up skips the rest of the warm-up, same gesture as the tennis one.
+    this.skipGesture.step(dtMs / 1000, performance.now());
+    if (this.skipGesture.progress01 >= 1) {
+      tutorial.skip();
+      this.status = 'Tutorial completo!';
+    }
+    if (tutorial.done) {
+      if (!this.travelAdapted) {
+        this.travelAdapted = true;
+        this.options.onPunchTravel?.(tutorial.punchTravel ?? PUNCH_THRESHOLDS.confirmForwardTravel);
+      }
+      this.restartMsLeft = MATCH_PAUSE_MS;
+      this.audio?.bell('ko');
+    }
+  }
+
   private stepFight(dtMs: number): void {
     if (this.match.winner) {
+      if (this.holdResult) return;
       this.restartMsLeft -= dtMs;
       if (this.restartMsLeft <= 0) {
         this.match = createBoxing();
+        this.defenseHistory.length = 0;
         this.resetExchange();
         this.status = 'Nova luta';
       }
@@ -542,30 +748,101 @@ export class BoxingGame {
       return;
     }
 
-    this.fightMs += dtMs;
-    this.moveFighters(dtMs);
-    const inRange = inPunchRange(this.playerPos, this.opponentPos);
-    this.zoneHistory.push({ atMs: this.fightMs, zone: this.zone, guarded: this.guarding(), inRange });
-    while (this.zoneHistory[0] && this.zoneHistory[0].atMs < this.fightMs - ZONE_HISTORY_MS) this.zoneHistory.shift();
-
-    const stepped = stepOpponent(this.ai, this.fightMs, this.zone, this.rng);
-    this.ai = stepped.state;
-    if (stepped.attack) this.resolveAttack(stepped.attack);
-    if (this.match.winner) return;
-
-    // A punch already past its impact is only waiting out pose latency: the bell does not save
-    // the player. It resolves before the last tick so it can still change the decision.
-    const { phase } = this.ai;
-    if (dtMs >= this.match.roundMsLeft && phase.kind === 'windup' && phase.impactAtMs <= this.fightMs) {
-      this.resolveAttack(phase);
-      if (this.match.winner) return;
+    // Only the post-impact grace continues after the bell; no new attacks can start.
+    if (this.pendingBell) {
+      this.fightMs += dtMs;
+      this.movePlayer(dtMs);
+      this.recordZone();
+      const stepped = stepOpponent(this.ai, this.fightMs, this.zone, this.rng);
+      this.ai = stepped.state;
+      if (stepped.attack) this.pendingBell.attack = stepped.attack;
+      if (this.fightMs < this.pendingBell.untilMs) return;
+      const { remainingRoundMs } = this.pendingBell;
+      this.resolvePendingImpact(this.pendingBell);
+      this.pendingBell = undefined;
+      if (!this.match.winner) this.finishRound(remainingRoundMs);
+      return;
     }
 
-    const tick = tickRound(this.match, dtMs);
+    const activeMs = Math.min(dtMs, this.match.roundMsLeft);
+    this.fightMs += activeMs;
+    this.moveFighters(activeMs);
+    this.recordZone();
+
+    const observed = [...this.zoneHistory].reverse().find((sample) => sample.atMs <= this.fightMs - 200 && sample.atMs > this.perceptionEpochMs);
+    const phaseBefore = this.ai.phase;
+    if (!this.pendingImpact && phaseBefore.kind === 'windup' && phaseBefore.impactAtMs <= this.fightMs) {
+      this.pendingImpact = { untilMs: phaseBefore.impactAtMs + IMPACT_GRACE_MS, punches: [] };
+    }
+    const stepped = stepOpponent(this.ai, this.fightMs, observed?.zoneKnown ? observed.zone : 0, this.rng, observed ? {
+      inRange: observed.inRange && (!this.cameraSeen || (this.cameraTracking && !this.requiresFreshZone)),
+      playerGuarding: observed.guarded,
+      style: this.profile.id,
+      habits: {
+        samples: this.defenseHistory.length,
+        slips: this.defenseHistory.filter((sample) => sample.slipped).length,
+        ducks: this.defenseHistory.filter((sample) => sample.ducked).length,
+      },
+    } : { inRange: false, playerGuarding: false, style: this.profile.id });
+    this.ai = stepped.state;
+    if (stepped.attack && this.pendingImpact) this.pendingImpact.attack = stepped.attack;
+    if (this.pendingImpact && this.fightMs >= this.pendingImpact.untilMs) {
+      this.resolvePendingImpact(this.pendingImpact);
+      this.pendingImpact = undefined;
+    }
+    if (this.match.winner) return;
+
+    if (activeMs >= this.match.roundMsLeft) {
+      this.roundEndedWallMs = performance.now() - (dtMs - activeMs);
+      this.dash = undefined;
+      if (this.pendingImpact) {
+        this.pendingBell = {
+          ...this.pendingImpact,
+          atFightMs: this.fightMs,
+          untilMs: Math.max(this.pendingImpact.untilMs, this.fightMs + MAX_PUNCH_LOOKBACK_MS),
+          remainingRoundMs: this.match.roundMsLeft,
+        };
+        this.pendingImpact = undefined;
+      } else {
+        this.finishRound(activeMs);
+      }
+      return;
+    }
+    this.match = tickRound(this.match, activeMs).state;
+  }
+
+  /** Commit physical events once older events can no longer arrive. */
+  private resolvePendingImpact(pending: PendingImpact): void {
+    const { attack, punches } = pending;
+    punches.sort((a, b) => a.atMs - b.atMs);
+    for (const hit of punches.filter((item) => !attack || item.atMs <= attack.impactAtMs)) {
+      this.landPunch(hit.hand, hit.power01, hit.atMs, applyPlayerPunch, hit.kind, hit.target, hit.onsetMs);
+      if (this.match.winner) return;
+    }
+    if (attack) this.resolveAttack(attack);
+    if (this.match.winner) return;
+    if (attack) for (const hit of punches.filter((item) => item.atMs > attack.impactAtMs)) {
+      this.landPunch(hit.hand, hit.power01, hit.atMs, applyPlayerPunch, hit.kind, hit.target, hit.onsetMs);
+      if (this.match.winner) return;
+    }
+  }
+
+  private recordZone(): void {
+    const inRange = inPunchRange(this.playerPos, this.opponentPos);
+    this.zoneHistory.push({
+      atMs: this.fightMs, zone: this.zone, guarded: this.guarding(), ducked: this.cameraDuck, inRange,
+      playerPos: { ...this.playerPos }, opponentPos: { ...this.opponentPos }, playerPunching: HANDS.some((hand) => this.punchAnimS[hand] < PUNCH_ANIM_S),
+      guardKnown: this.keyGuard || !this.cameraSeen || (this.cameraTracking && this.cameraGuardValid && performance.now() - this.cameraGuardAtMs <= 500),
+      zoneKnown: !this.cameraSeen || (this.cameraTracking && this.cameraZoneValid && performance.now() - this.cameraZoneAtMs <= 500),
+      duckKnown: !this.cameraSeen || (this.cameraTracking && this.cameraDuckValid && performance.now() - this.cameraDuckAtMs <= 500),
+    });
+    while (this.zoneHistory[0] && this.zoneHistory[0].atMs < this.fightMs - ZONE_HISTORY_MS) this.zoneHistory.shift();
+  }
+
+  private finishRound(elapsedMs: number): void {
+    const tick = tickRound(this.match, elapsedMs);
     this.match = tick.state;
     if (!tick.roundEnded) return;
-    this.roundEndedWallMs = performance.now();
-    this.dash = undefined;
     if (tick.matchEnded) this.endMatch();
     else {
       this.breakMsLeft = ROUND_BREAK_MS;
@@ -601,13 +878,15 @@ export class BoxingGame {
   private moveFighters(dtMs: number): void {
     this.movePlayer(dtMs);
 
+    const observed = [...this.zoneHistory].reverse().find((sample) => sample.atMs <= this.fightMs - 200 && sample.atMs > this.perceptionEpochMs);
     this.opponentMotion = stepOpponentMotion(
       this.opponentMotion,
       this.playerPos,
       {
         phase: this.ai.phase.kind,
         skill: this.profile.skill,
-        playerPunching: HANDS.some((hand) => this.punchAnimS[hand] < PUNCH_ANIM_S),
+        playerPunching: (!this.cameraSeen || (this.cameraTracking && !this.requiresFreshZone)) && (observed?.playerPunching ?? false),
+        observedPlayer: observed?.playerPos ?? this.playerPos,
       },
       dtMs / 1000,
       this.motionRng,
@@ -647,13 +926,21 @@ export class BoxingGame {
       this.audio?.whoosh(0.6);
       return;
     }
-    const dodged = isDodged(attack.targetZone, samples.map(({ zone }) => zone));
+    const dodged = isDodgedTyped(attack, samples.map(({ zone }) => zone), samples.map(({ ducked }) => ducked));
+    // Samples without a valid camera opinion cannot be treated as a failed defense.
+    if (samples.length > 0 && samples.every((sample) => sample.zoneKnown && sample.duckKnown)) {
+      this.defenseHistory.push({
+        slipped: samples.some((sample) => sample.zone !== attack.targetZone),
+        ducked: samples.some((sample) => sample.ducked),
+      });
+      if (this.defenseHistory.length > 8) this.defenseHistory.shift();
+    }
     // Same grace as the dodge: fists that come up within the pose-latency window count.
     const guarded = samples.some((sample) => sample.guarded);
     const result = applyOpponentPunch(this.match, { dodged, guarded });
     this.match = result.state;
     if (dodged) {
-      this.counter = { fromMs: this.fightMs, untilMs: this.fightMs + COUNTER_WINDOW_MS };
+      this.counter = { fromMs: attack.impactAtMs, untilMs: attack.impactAtMs + COUNTER_WINDOW_MS };
       this.setFeedback('ESQUIVOU!', 'good');
       this.audio?.success(1);
     } else if (guarded && !result.ko) {
@@ -726,8 +1013,11 @@ export class BoxingGame {
   /** A fresh opponent in guard: nothing wound up before a break carries into the next exchange. */
   private resetExchange(): void {
     this.breakMsLeft = 0;
+    this.pendingBell = undefined;
+    this.pendingImpact = undefined;
     this.roundEndedWallMs = undefined;
     this.counter = undefined;
+    this.seenPunchStartIds.clear();
     this.zoneHistory = [];
     this.playerPos = PLAYER_START;
     this.opponentMotion = createOpponentMotion(OPPONENT_START);
@@ -751,6 +1041,12 @@ export class BoxingGame {
       this.bag?.reset();
     }
     if (this.mode === 'dodge') this.dodgeChallenge = new DodgeChallenge();
+    if (this.mode === 'tutorial') {
+      this.tutorial = new BoxingTutorial();
+      this.travelAdapted = false;
+      // The travel floor is not lowered again: the next completion re-adapts it, and in the
+      // meantime the player keeps whatever the last warm-up measured instead of the floor.
+    }
     this.runningSinceWallMs = performance.now();
     this.status = this.initialStatus();
   }
@@ -766,12 +1062,14 @@ export class BoxingGame {
   private initialStatus(): string {
     if (this.mode === 'bag') return 'Siga o ritmo do saco';
     if (this.mode === 'dodge') return 'Leia o golpe e ocupe a zona segura';
+    if (this.mode === 'tutorial') return 'Aprenda os golpes no seu ritmo';
     return 'Soque quando a guarda abrir';
   }
 
   private trainingFinished(): boolean {
     if (this.mode === 'bag') return this.bagTrainer?.snapshot.status === 'won';
     if (this.mode === 'dodge') return this.dodgeChallenge !== undefined && this.dodgeChallenge.snapshot.status !== 'active';
+    if (this.mode === 'tutorial') return this.tutorial?.done === true;
     return false;
   }
 
@@ -925,12 +1223,14 @@ export class BoxingGame {
   private publishHud(): void {
     const training = this.trainingScoreboard();
     const finished = this.mode === 'fight' ? this.match.winner !== undefined : this.trainingFinished();
-    const countdownDetail = this.mode === 'bag' ? 'Prepare o ritmo' : this.mode === 'dodge' ? 'Leia o golpe' : 'Guarda alta';
+    const countdownDetail = this.mode === 'bag' ? 'Prepare o ritmo' : this.mode === 'dodge' ? 'Leia o golpe' : this.mode === 'tutorial' ? 'Aprenda os golpes' : 'Guarda alta';
     const banner = this.gate.phase === 'countdown' ? { title: String(this.gate.count), detail: countdownDetail }
       : this.gate.phase === 'paused' ? { title: 'PAUSA', detail: 'Volte para a câmera ou aperte W A S D' }
       : finished ? { title: this.status }
       : this.mode === 'fight' && this.breakMsLeft > 0 ? { title: `ROUND ${this.match.round}`, detail: 'Intervalo' }
-      : undefined;
+      : this.mode === 'fight' && !this.pendingBell && this.ai.phase.kind === 'windup'
+        ? { title: `${{ straight: 'RETO', hook: 'GANCHO', uppercut: 'UPPERCUT' }[this.ai.phase.attackKind]} · ${this.ai.phase.target === 'head' ? 'CABEÇA' : 'CORPO'}` }
+        : undefined;
     const selectionOpen = this.gate.phase === 'countdown' || finished;
     this.onHud({
       score: training?.score ?? this.match.opponentHp,
@@ -945,8 +1245,9 @@ export class BoxingGame {
         maxHp: MAX_HP,
         round: this.match.round,
         rounds: ROUND_COUNT,
-        secondsLeft: Math.ceil(this.match.roundMsLeft / 1000),
+        secondsLeft: this.pendingBell ? 0 : Math.ceil(this.match.roundMsLeft / 1000),
         ...(selectionOpen ? { selectionOpen: true } : {}),
+        ...(this.mode === 'fight' && this.match.winner ? { winner: this.match.winner } : {}),
         ...(training ? { training } : {}),
       },
     });

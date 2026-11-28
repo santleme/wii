@@ -1,57 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import {
-  formatTime,
-  MAX_SPEED_MPS,
-  parseRecords,
-  placeAmong,
-  Race,
-  recordTime,
-  type Split,
-} from '../src/games/athletics/race';
+import { formatTime, parseRecords, recordTime } from '../src/games/athletics/race';
 import { QualityGovernor } from '../src/games/core/qualityGovernor';
 
-const STEP = 1 / 60;
-
-describe('Race', () => {
-  it('records each 100 m split once and stops at the goal', () => {
-    const race = new Race(400);
-    const splits: Split[] = [];
-    for (let i = 0; i < 60 * 60; i += 1) {
-      const split = race.advance(STEP, 1);
-      if (split) splits.push(split);
-    }
-    expect(splits.map((s) => s.meters)).toEqual([100, 200, 300, 400]);
-    expect(splits[0]!.seconds).toBeCloseTo(100 / MAX_SPEED_MPS, 5);
-    expect(race.finished).toBe(true);
-    expect(race.distance).toBe(400);
-    expect(race.seconds).toBeCloseTo(400 / MAX_SPEED_MPS, 5);
-  });
-
-  it('keeps the clock running while stopped', () => {
-    const race = new Race();
-    race.advance(1, 0);
-    expect(race.seconds).toBe(1);
-    expect(race.distance).toBe(0);
-  });
-
+describe('race clock', () => {
   it('formats minutes, seconds and tenths', () => {
     expect(formatTime(0)).toBe('0:00.0');
     expect(formatTime(65.47)).toBe('1:05.4');
-  });
-});
-
-describe('placement', () => {
-  const ran = (speed01: number) => {
-    const race = new Race(100);
-    for (let i = 0; i < 60 * 30; i += 1) race.advance(STEP, speed01);
-    return race;
-  };
-
-  it('counts only rivals that finished sooner', () => {
-    const player = ran(0.8);
-    expect(placeAmong(player.seconds, [ran(0.9), ran(0.7)])).toBe(2);
-    expect(placeAmong(player.seconds, [ran(0.9), ran(1)])).toBe(3);
-    expect(placeAmong(player.seconds, [ran(0), ran(0.7)])).toBe(1);
   });
 });
 

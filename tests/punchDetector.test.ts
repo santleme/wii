@@ -116,6 +116,15 @@ describe('PunchDetector', () => {
     expect(power(120)).toBeGreaterThan(power(300));
   });
 
+  it('confirms a compact punch once the travel floor adapts to the player', () => {
+    const compact: Arm = { elbow: { x: 0, y: 0.02, z: -0.12 }, wrist: { x: 0, y: 0.02, z: -0.26 } };
+    const keys: [number, Arm][] = [[0, GUARD], [300, GUARD], [400, compact], [900, compact]];
+    expect(kinds(run(new PunchDetector('right'), keys))).toEqual(['onset']);
+    const adapted = new PunchDetector('right');
+    adapted.minTravel = 0.15;
+    expect(kinds(run(adapted, keys))).toEqual(['onset', 'confirmed']);
+  });
+
   it('does not confirm depth-only motion with the elbow staying bent', () => {
     const forward = (point: Point3) => ({ ...point, z: point.z - 0.4 });
     // A large depth swing of elbow and wrist: plenty of forward travel, never a straight arm.
@@ -134,6 +143,17 @@ describe('PunchDetector', () => {
       expect(run(new PunchDetector('right'), [[0, GUARD], [300, GUARD], [450, target], [900, target]])).toEqual([]);
     });
   }
+
+  it('counts confirmation failure causes without clearing them on reset', () => {
+    const detector = new PunchDetector('right');
+    const half = mix(GUARD, STRAIGHT, 0.45);
+    run(detector, [[0, GUARD], [300, GUARD], [400, half], [500, GUARD], [900, GUARD]]);
+    expect(detector.diagnostics).toMatchObject({ onsets: 1, confirmed: 0, missingExtension: 1, missingTravel: 0 });
+    detector.reset();
+    expect(detector.diagnostics.onsets).toBe(1);
+    detector.resetDiagnostics();
+    expect(detector.diagnostics.onsets).toBe(0);
+  });
 
   it('does not confirm a feint that retracts before extending', () => {
     const half = mix(GUARD, STRAIGHT, 0.45);
@@ -265,6 +285,37 @@ describe('PunchDetector', () => {
     expect(attempt(false)).toEqual(['onset', 'confirmed']);
     expect(attempt(true)).toEqual([]);
   });
+  it('measures travel from where the motion started, not from the late onset', () => {
+    // A slow wind-up accelerates into the punch: the onset fires mid-course, but the travel
+    // must reach back to the guard position, or compact punches never satisfy confirmation.
+    const keys: [number, Arm][] = [
+      [0, GUARD], [300, GUARD],
+      [600, mix(GUARD, STRAIGHT, 0.35)], // gradual start: below onset speed
+      [750, STRAIGHT], [950, STRAIGHT], [1200, GUARD], [1600, GUARD],
+    ];
+    const detector = new PunchDetector('right');
+    const outputs = run(detector, keys, { fps: 30, to: 1600 });
+    const confirmed = outputs.find((output) => output.kind === 'confirmed');
+    expect(confirmed).toBeDefined();
+    if (confirmed?.kind !== 'confirmed') return;
+    // The full GUARD -> STRAIGHT course is ~0.4 shoulder widths at the fixture scale; measuring
+    // from the onset instead of the motion start would report only a fraction of it.
+    expect(confirmed.measurement.forwardTravel).toBeGreaterThan(0.5);
+    expect(confirmed.measurement.origin.forward).toBeLessThan(confirmed.measurement.contact.forward - 0.5);
+  });
+
+  it('confirms a compact punch whose extension peak coincides with the retraction', () => {
+    // Shadow-boxing punches retract as soon as they extend: at 15 fps the filtered extension
+    // peak only appears in the first retracting frames, and the window must not close before it.
+    const partial = mix(GUARD, STRAIGHT, 0.8);
+    const keys: [number, Arm][] = [
+      [0, GUARD], [300, GUARD], [450, partial], [520, partial], [700, GUARD], [1400, GUARD],
+    ];
+    const detector = new PunchDetector('right');
+    const outputs = run(detector, keys, { fps: 15, to: 1400 });
+    expect(kinds(outputs)).toContain('confirmed');
+  });
+
 });
 
 describe('isGuardingPose', () => {
@@ -289,4 +340,5 @@ describe('isGuardingPose', () => {
     const worldLandmarks = snapshot.worldLandmarks.map((point, index) => (index === 15 ? { ...point, visibility: 0 } : point));
     expect(isGuardingPose({ ...snapshot, worldLandmarks }, calibration())).toBe(false);
   });
+
 });

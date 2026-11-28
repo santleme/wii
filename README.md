@@ -4,7 +4,7 @@
 
 # Wii Web Sports Arena
 
-**Seu corpo é o controle.** Uma arena arcade no navegador com corrida de obstáculos e tênis, controlada por pose via webcam.
+**Seu corpo é o controle.** Uma arena arcade no navegador com atletismo (100, 200 e 400 m no estádio) e tênis, controlada por pose via webcam.
 
 </div>
 
@@ -21,7 +21,7 @@ npm ci
 npm run dev
 ```
 
-O servidor local imprime a URL de desenvolvimento. A primeira ação **Ativar câmera** solicita permissão. Não há etapa manual de calibração: corrida e salto entram assim que o torso é rastreado, enquanto escala corporal, postura neutra e referências das mãos convergem continuamente em segundo plano conforme você joga. A mão da raquete é detectada pelo movimento. Se a câmera não estiver disponível, setas e espaço continuam funcionando.
+O servidor local imprime a URL de desenvolvimento. A primeira ação **Ativar câmera** solicita permissão. Os dois jogos se jogam só com o corpo: o atletismo enquadra o jogador e faz um aquecimento de 5 s que aprende o máximo daquela pessoa e câmera; o tênis abre com um aquecimento guiado na quadra; levantar as duas mãos joga de novo. Como tudo funciona, o que foi medido e o que falta estão em [docs/jogos-pelo-corpo.md](docs/jogos-pelo-corpo.md); o índice da documentação está em [docs/README.md](docs/README.md).
 
 ```bash
 npm test
@@ -43,13 +43,13 @@ O build copia a variante module do WASM do MediaPipe fixado no lockfile para `pu
 - `src/app/`, `src/pages/`, `src/components/`: rotas e interface do website; `ArenaShell` monta o jogo em `/app`.
 - `docs/research/`: artigos e figuras PT/EN; regras visuais em `docs/website-design.md`.
 - `packages/core/` (`@wii/spatial-core`): pacote headless de percepção — Worker do Pose Landmarker (variante WASM module, `useModule`), cliente de captura com um frame em trânsito que mantém o worker quente entre liga/desliga, protocolos, filtro 1-Euro e replay de pose.
-- `src/cv/`: fiação fina sobre o core (URLs padrão dos ativos locais, aquecimento) e a auto-calibração online contínua.
-- `src/kinematics/`: histerese, gating de confiança e detectores puros sobre o filtro 1-Euro do core.
-- `src/games/`: loop fixo Three.js e cenas arcade desacopladas da câmera.
+- `src/cv/`: fiação fina sobre o core (URLs padrão dos ativos locais, CPU ou GPU, aquecimento) e a auto-calibração online contínua. Em `src/cv/diagnostics/`, as ferramentas de desenvolvimento (gravação, trechos de erro, fotos), ligadas só com `?debug` ou `?fotos`.
+- `src/kinematics/`: detectores puros sobre a pose: intensidade da corrida, raquetada, enquadramento e os detectores da corrida com obstáculos.
+- `src/games/`: loop fixo Three.js e as cenas, desacopladas da câmera: `athletics/` e `tennis/` (no menu), `track/` (obstáculos, fora do menu) e `core/` (loop, reinício pelas mãos, qualidade gráfica).
 - `src/ui/`: canvas do jogo em tela cheia, seletor de modalidade e PiP da câmera.
-- `tests/`: fixtures sintéticas e testes determinísticos dos detectores.
+- `tests/`: fixtures sintéticas e testes determinísticos; `tests/recordings/` (fora do git) guarda gravações reais repetidas pelos testes `recorded*`.
 
-O vídeo é processado no dispositivo e não é enviado ao servidor do jogo. O MediaPipe informa que pode enviar métricas de desempenho e utilização da API ao Google; o aviso aparece no PiP da câmera. O app usa a variante Lite do Pose Landmarker, hospedada localmente com o app; os modelos Full de pose e de mão também são versionados e verificados, para o pacote `@wii/spatial-core`. Consulte [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+O vídeo é processado no dispositivo e não é enviado ao servidor do jogo. O MediaPipe informa que pode enviar métricas de desempenho e utilização da API ao Google; o aviso aparece no PiP da câmera. Por padrão o app roda a visão na CPU com a variante Lite do Pose Landmarker; `?delegate=gpu` usa a GPU com o modelo Full. Todos os modelos são hospedados com o app, versionados e verificados. Consulte [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Deploy
 
@@ -57,12 +57,15 @@ No Vercel, use a raiz do repositório como Root Directory, `npm run build` como 
 
 ## Controles
 
-| Ação | Webcam | Teclado |
-| --- | --- | --- |
-| Correr | Ande ou corra no lugar | Seta para baixo alterna andar / correr / parar |
-| Pular | Salto vertical | Espaço ou seta para cima |
-| Trocar de raia | Incline o tronco | Setas esquerda/direita |
-| Bater no tênis | Raquetada dominante | Espaço |
+Os dois jogos do menu não têm teclado.
+
+| Ação | Como |
+| --- | --- |
+| Escolher no menu | Cursor da mão |
+| Correr (atletismo) | Corra no lugar bombeando os braços; quanto mais forte, mais rápido |
+| Rebater (tênis) | Raquetada de lado a lado; cedo cruza, tarde vai reto |
+| Jogar de novo | Levante as duas mãos por 1,5 s |
+| Voltar ao menu (tela de resultado) | Cruze os antebraços em X por 1,5 s |
 
 <div align="center">
 <picture>

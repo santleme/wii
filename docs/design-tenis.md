@@ -84,9 +84,9 @@ Regras arcade simplificadas (decisões de design):
 2. Retrocede a bola analiticamente a `t_peak`: posição, velocidade, quantas quicas já houve.
 3. `timingError = t_peak − t_ideal`, onde `t_ideal` é o instante em que a bola cruza o plano de contato em altura golpeável (0,4-2,2 u).
 4. Janelas (arcade, generosas — decisão de design afinável):
-   - `|timingError| ≤ 280 ms` e bola ao alcance lateral (≤1,15 u) e não morta (sem segunda quica, não passada) → **contato**.
+   - `|timingError| ≤ 500 ms` e bola ao alcance lateral (≤2,2 u) e não morta (sem segunda quica, não passada) → **contato**.
    - Fora disso → **whiff** (a bola segue viva; o ponto se resolve pela física).
-5. Direção do retorno: mapeamento contínuo `timingError → ângulo lateral` com sinal dependente do lado do stroke — cedo → cruzada, tarde → paralela; no backhand espelha, como no tênis real. `timingError` extremo (>~200 ms) manda a bola tão aberta que sai — o erro nasce da geometria, não de regra especial.
+5. Direção do retorno: mapeamento contínuo `timingError → ângulo lateral` com sinal dependente do lado do stroke — cedo → cruzada, tarde → paralela; no backhand espelha, como no tênis real. `timingError` extremo (>~350 ms) manda a bola tão aberta que sai — o erro nasce da geometria, não de regra especial.
 6. Potência: `power01` do evento modula a velocidade de saída (11-20 u/s). Cap reduzido se o avatar estava em deslocamento. Bola alta (acima do ombro no contato) vira smash: ângulo para baixo, bônus de velocidade.
 7. Spin: vy do punho no pico — subindo forte = topspin (quica kickando para cima/frente), descendo = slice (quica rasteiro). Efeito físico **apenas no bounce** — visível e honesto.
 
@@ -165,3 +165,21 @@ Espaço dispara um swing sintético com `peakTimestampMs = agora` — ou seja, *
 - Modo fantoche contínuo (raquete do avatar dirigida pelo punho em tempo real) — futuro se a animação procedural não convencer.
 - Multiplayer / duplas.
 - Dificuldade adaptativa além da rampa linear.
+
+## Como o Wii Sports faz, e o que adotamos
+
+Consultado em [MiiWiki](https://miiwiki.org/wiki/Tennis) e
+[Wikibooks](https://en.wikibooks.org/wiki/Wii_Sports/Tennis). São fontes de fãs.
+
+| Wii Sports, segundo as fontes | Aqui |
+| --- | --- |
+| Movimento automático; o jogador só rebate | Igual |
+| Tempo e altura da raquetada definem a direção | O tempo define o lado; onde o golpe termina define o arco |
+| Saque: lança a bola e bate; no topo sai um saque rápido com rastro branco | Igual, mas o lançamento é automático |
+| Baixo para alto faz lob; alto para baixo faz slice | Terminar bem acima da cabeça (altura prevista pela velocidade de subida): bola alta. Terminar abaixo do peito: rasante |
+| Sempre em duplas | Simples |
+| 1 game, melhor de 3 ou de 5; 15, 30, 40 e vantagem | Melhor de 3 |
+| Torcida de Miis | Torcida simples |
+
+**As fontes não falam de falta, dupla falta nem das regras de rede e fora.** Por decisão nossa, para o
+jogo fluir: um golpe que acerta a bola sempre passa a rede, e o saque sempre entra.

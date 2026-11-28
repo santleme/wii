@@ -4,6 +4,7 @@ import {
   DEFAULT_SKILL,
   IMPACT_GRACE_MS,
   isDodged,
+  isDodgedTyped,
   MAX_PUNCH_LOOKBACK_MS,
   type OpponentAiState,
   openingAt,
@@ -57,18 +58,23 @@ describe('boxing opponent AI', () => {
     expect(stepOpponent(guard, guardEnd(guard) - 1, 0, noRng)).toEqual({ state: guard });
   });
 
-  it('rolls hand then duration and targets the zone at windup start', () => {
+  it('rolls hand, duration, kind and target in order and targets the zone at windup start', () => {
     const guard = createOpponentAi(0, constantRng(0), 0);
     const at = guardEnd(guard);
-    const { state, attack } = stepOpponent(guard, at, -1, sequenceRng([0.2, 0.5]));
+    const { state, attack } = stepOpponent(guard, at, -1, sequenceRng([0.2, 0.5, 0.6, 0.9]));
     expect(attack).toBeUndefined();
-    expect(state.phase).toEqual({ kind: 'windup', hand: 'left', targetZone: -1, impactAtMs: at + 850 });
+    expect(state.phase).toEqual({ kind: 'windup', hand: 'left', targetZone: -1, impactAtMs: at + 850, attackKind: 'hook', target: 'body' });
     expect(state.previous).toBe(guard.phase);
     expect(state.phaseStartedMs).toBe(at);
     expect(guard.phase.kind).toBe('guard');
-    expect(stepOpponent(guard, at, 1, sequenceRng([0.7, 0])).state.phase).toMatchObject({
+    expect(stepOpponent(guard, at, 1, sequenceRng([0.7, 0, 0.1, 0.1])).state.phase).toMatchObject({
       hand: 'right',
       targetZone: 1,
+      attackKind: 'straight',
+      target: 'head',
+    });
+    expect(stepOpponent(guard, at, 1, sequenceRng([0.7, 0, 0.9, 0.1])).state.phase).toMatchObject({
+      attackKind: 'uppercut',
     });
   });
 
@@ -88,7 +94,7 @@ describe('boxing opponent AI', () => {
     // Moving after the windup started does not retarget it, and nothing resolves early.
     expect(stepOpponent(state, resolveAt - 1, -1, noRng)).toEqual({ state });
     const resolved = stepOpponent(state, resolveAt, -1, noRng);
-    expect(resolved.attack).toEqual({ hand: 'left', targetZone: 1, impactAtMs: phase.impactAtMs });
+    expect(resolved.attack).toEqual({ hand: 'left', targetZone: 1, impactAtMs: phase.impactAtMs, attackKind: 'straight', target: 'head' });
     expect(resolved.state.phase.kind).toBe('recover');
     expect(stepOpponent(resolved.state, resolveAt, -1, noRng).attack).toBeUndefined();
   });
@@ -147,5 +153,54 @@ describe('boxing opponent AI', () => {
     expect(isDodged(0, [0, 0, 0])).toBe(false);
     expect(isDodged(0, [0, 1, 0])).toBe(true);
     expect(isDodged(-1, [1])).toBe(true);
+  });
+});
+
+describe('isDodgedTyped defense matrix', () => {
+  const attack = (attackKind: 'straight' | 'hook' | 'uppercut', target: 'head' | 'body') => ({ attackKind, target, targetZone: 0 as const });
+  const slipped = [1, 1] as const;
+  const held = [0, 0] as const;
+
+  it('straight to the head is slipped or ducked', () => {
+    expect(isDodgedTyped(attack('straight', 'head'), [...slipped], [false])).toBe(true);
+    expect(isDodgedTyped(attack('straight', 'head'), [...held], [true])).toBe(true);
+    expect(isDodgedTyped(attack('straight', 'head'), [...held], [false])).toBe(false);
+  });
+
+  it('straight to the body is neither slipped nor ducked — only range or guard', () => {
+    expect(isDodgedTyped(attack('straight', 'body'), [...slipped], [false])).toBe(false);
+    expect(isDodgedTyped(attack('straight', 'body'), [...held], [true])).toBe(false);
+  });
+
+  it('hook is ducked but never slipped', () => {
+    expect(isDodgedTyped(attack('hook', 'head'), [...held], [true])).toBe(true);
+    expect(isDodgedTyped(attack('hook', 'head'), [...slipped], [false])).toBe(false);
+  });
+
+  it('uppercut is slipped but ducking into it never helps', () => {
+    expect(isDodgedTyped(attack('uppercut', 'head'), [...slipped], [false])).toBe(true);
+    expect(isDodgedTyped(attack('uppercut', 'head'), [...held], [true])).toBe(false);
+    expect(isDodgedTyped(attack('uppercut', 'body'), [...slipped], [true])).toBe(true);
+  });
+
+  it('a duck anywhere inside the impact window counts', () => {
+    expect(isDodgedTyped(attack('hook', 'head'), [...held], [false, true, false])).toBe(true);
+  });
+});
+
+describe('contextual boxing decisions', () => {
+  it('waits until the observed opponent is in range', () => {
+    const state = createOpponentAi(0, () => 0);
+    expect(stepOpponent(state, guardEnd(state), 0, noRng, { inRange: false, playerGuarding: false, style: 'technical' }).state).toBe(state);
+  });
+
+  it('uses repeated reliable defense patterns while retaining variety', () => {
+    const state = createOpponentAi(0, () => 0);
+    const decide = (habits: { samples: number; slips: number; ducks: number }) =>
+      stepOpponent(state, guardEnd(state), 0, sequenceRng([0, 0, 0.73, 0.5]), {
+        inRange: true, playerGuarding: true, style: 'aggressive', habits,
+      }).state.phase;
+    expect(decide({ samples: 1, slips: 1, ducks: 0 })).toMatchObject({ attackKind: 'uppercut' });
+    expect(decide({ samples: 4, slips: 4, ducks: 0 })).toMatchObject({ attackKind: 'hook' });
   });
 });

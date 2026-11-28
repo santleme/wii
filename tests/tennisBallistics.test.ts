@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  solveOverNet,
   advanceBall,
   createBall,
   DEFAULT_BALLISTICS,
@@ -154,4 +155,14 @@ describe('ballistics', () => {
       expect(timeAtPlane(ball, 3)).toEqual({ timeSeconds: 0, y: 1.5 });
     });
   });
+});
+
+it('lofts a low or early contact until it clears the net and still lands on target', () => {
+  for (const from of [{ x: 0, y: 0.1, z: 9.5 }, { x: 1, y: 0.2, z: 2 }, { x: 0, y: 1, z: 7.2 }]) {
+    const velocity = solveOverNet(from, { x: -2, z: -8 }, 0.7);
+    const flight = createBall(from, velocity, 'player');
+    expect(advanceBall(flight, -from.z / velocity.z).position.y).toBeGreaterThan(0.9);
+    const landed = (-8 - from.z) / velocity.z;
+    expect(advanceBall(flight, landed).position.y).toBeCloseTo(0, 1);
+  }
 });

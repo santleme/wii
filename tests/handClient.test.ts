@@ -98,4 +98,42 @@ describe('HandClient worker boundary', () => {
     expect(client.isReady).toBe(false);
     expect(bitmap.close).not.toHaveBeenCalled();
   });
+
+  it('disposes the worker when a fatal error arrives after its hand result', async () => {
+    vi.stubGlobal('Worker', FakeWorker);
+    vi.stubGlobal('window', { setTimeout, clearTimeout });
+
+    const client = new HandClient({ wasmBaseUrl: '/mediapipe/wasm-1.2.3', modelUrl: '/mediapipe/models/hand.task' });
+    const onStatus = vi.fn();
+    await client.init({ onStatus });
+    onStatus.mockClear();
+    const worker = FakeWorker.instance!;
+
+    const firstBitmap = { close: vi.fn() } as unknown as ImageBitmap;
+    const firstPending = client.processFrame(firstBitmap, 10);
+    const firstFrame = worker.sent.filter((message) => message.type === 'FRAME').at(-1);
+    if (firstFrame?.type !== 'FRAME') throw new Error('Expected the first hand frame');
+    worker.reply({ type: 'HAND', requestId: firstFrame.requestId, timestampMs: 10, hands: [] });
+    await expect(firstPending).resolves.toEqual({ timestampMs: 10, hands: [] });
+
+    const secondBitmap = { close: vi.fn() } as unknown as ImageBitmap;
+    const secondPending = client.processFrame(secondBitmap, 20);
+    const secondFrame = worker.sent.filter((message) => message.type === 'FRAME').at(-1);
+    if (secondFrame?.type !== 'FRAME') throw new Error('Expected the second hand frame');
+
+    worker.reply({
+      type: 'ERROR',
+      stage: 'detect',
+      fatal: true,
+      requestId: firstFrame.requestId,
+      message: 'CPU fallback failed after the hand result.',
+    });
+
+    expect(onStatus).toHaveBeenCalledWith('error', 'CPU fallback failed after the hand result.');
+    expect(client.isReady).toBe(false);
+    expect(worker.terminated).toBe(true);
+    await expect(secondPending).resolves.toBeUndefined();
+    expect(firstBitmap.close).not.toHaveBeenCalled();
+    expect(secondBitmap.close).not.toHaveBeenCalled();
+  });
 });

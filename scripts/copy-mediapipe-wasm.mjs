@@ -11,11 +11,14 @@ if (packageJson.version !== '1.2.3') throw new Error(`Unexpected tasks-vision ve
 
 const source = resolve(root, 'node_modules/@mediapipe/tasks-vision/wasm');
 const mediapipeDir = resolve(root, 'public/mediapipe');
+const current = `wasm-${packageJson.version}`;
+// Only stale versions go. Removing and recreating the current folder makes a running dev server
+// lose it and answer with index.html, which breaks the camera until it is restarted.
 for (const entry of await readdir(mediapipeDir)) {
-  if (entry === 'wasm' || entry.startsWith('wasm-'))
+  if ((entry === 'wasm' || entry.startsWith('wasm-')) && entry !== current)
     await rm(resolve(mediapipeDir, entry), { recursive: true, force: true });
 }
-const destination = resolve(mediapipeDir, `wasm-${packageJson.version}`);
+const destination = resolve(mediapipeDir, current);
 await mkdir(destination, { recursive: true });
 const files = ['vision_wasm_module_internal.js', 'vision_wasm_module_internal.wasm'];
 for (const file of files) await copyFile(resolve(source, file), resolve(destination, file));

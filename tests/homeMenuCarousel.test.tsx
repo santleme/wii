@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CarouselStepResult } from '../src/ui/carouselController';
 import { HAND_IDLE, type HandCursorInput } from '../src/ui/handCursorTypes';
 import { createHandInputStore } from '../src/ui/handInputStore';
-import { GamesMenu, HomeMenu } from '../src/ui/WiiMenu';
+import { HomeMenu } from '../src/ui/WiiMenu';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,7 +41,7 @@ function mockRaf() {
   };
 }
 
-function renderHome(input: HandCursorInput) {
+function renderHome(input: HandCursorInput, onPick = vi.fn(), onIronMan = vi.fn()) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -50,7 +50,8 @@ function renderHome(input: HandCursorInput) {
   const carouselDebugRef: { current: CarouselStepResult | undefined } = { current: undefined };
   act(() => {
     root.render(createElement(HomeMenu, {
-      onGames: vi.fn(),
+      onPick,
+      onIronMan,
       exit: null,
       handStore,
       rotationGateRef,
@@ -60,86 +61,36 @@ function renderHome(input: HandCursorInput) {
   return { container, root, handStore, rotationGateRef, carouselDebugRef };
 }
 
-function renderGames(onPick = vi.fn()) {
-  const container = document.body.appendChild(document.createElement('div'));
-  const root = createRoot(container);
-  const handStore = createHandInputStore();
-  const rotationGateRef = { current: false };
-  act(() => {
-    root.render(
-      createElement(GamesMenu, { onPick, onBack: vi.fn(), onHome: vi.fn(), handStore, rotationGateRef }),
-    );
-  });
-  const front = () => container.querySelector('.game-card.is-front')!;
-  return { container, root, handStore, rotationGateRef, onPick, front };
-}
-
-const tracked: HandCursorInput = { ...HAND_IDLE, visible: true, synced: true };
-
-describe('GamesMenu hand carousel', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
-    document.body.innerHTML = '';
-  });
-
-  it('turns with the palm, follows the front card in React and settles on a whole slot', () => {
-    mockReducedMotion();
-    const raf = mockRaf();
-    const { container, root, handStore, rotationGateRef, front } = renderGames();
-    expect(rotationGateRef.current).toBe(true);
-    expect(front().className).toContain('tennis');
-
-    let now = 1000;
-    const run = (input: Partial<HandCursorInput>, frames: number) => {
-      for (let index = 0; index < frames; index += 1) {
-        now += 16;
-        handStore.publish({ ...tracked, capturedAtMs: now, ...input });
-        act(() => raf.fire(now));
-      }
-    };
-    run({ rotationPhase: 'ROTATING', rotationAngularVelocity: 360 }, 24);
-    expect(front().className).not.toContain('tennis');
-    expect(container.querySelector('.games-ring')!.className).toContain('is-gesture-controlled');
-    run({}, 60);
-    expect(container.querySelector('.games-ring')!.className).not.toContain('is-gesture-controlled');
-    expect(front().getAttribute('style')).toContain('left: 50%');
-    act(() => root.unmount());
-    expect(rotationGateRef.current).toBe(false);
-  });
-
-  it('steps one card per swipe pulse and launches only the front card', () => {
-    mockReducedMotion();
-    mockRaf();
-    const { container, root, handStore, onPick, front } = renderGames();
-    act(() => handStore.publish({ ...tracked, swipeDirection: 1 }));
-    expect(front().className).toContain('boxing');
-    act(() => handStore.publish(tracked));
-    act(() => handStore.publish({ ...tracked, swipeDirection: -1 }));
-    expect(front().className).toContain('tennis');
-
-    act(() => container.querySelector<HTMLButtonElement>('.game-card.athletics')!.click());
-    expect(onPick).not.toHaveBeenCalled();
-    act(() => container.querySelector<HTMLButtonElement>('.game-card.athletics')!.click());
-    expect(onPick).toHaveBeenCalledWith('athletics');
-    act(() => root.unmount());
-  });
-
-  it('ignores a swipe from an unsynchronized hand', () => {
-    mockReducedMotion();
-    mockRaf();
-    const { root, handStore, front } = renderGames();
-    act(() => handStore.publish({ ...tracked, synced: false, swipeDirection: 1 }));
-    expect(front().className).toContain('tennis');
-    act(() => root.unmount());
-  });
-});
-
 describe('HomeMenu rotational carousel integration', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     document.body.innerHTML = '';
+  });
+
+  it('selects games on the wheel and lets athletics choose a distance', () => {
+    mockReducedMotion();
+    const onPick = vi.fn();
+    const { container, root } = renderHome(HAND_IDLE, onPick);
+    const athletics = container.querySelector<HTMLButtonElement>('[aria-label="Atletismo"]')!;
+    act(() => athletics.click());
+    expect(onPick).not.toHaveBeenCalled();
+    act(() => athletics.click());
+    expect(container.querySelector('[role="dialog"]')?.textContent).toContain('Escolha a distância');
+    act(() => [...container.querySelectorAll('button')].find((button) => button.textContent === '200 metros')!.click());
+    expect(onPick).toHaveBeenCalledWith('athletics', 200);
+    act(() => root.unmount());
+  });
+
+  it('starts Iron Man from Wii Sports', () => {
+    mockReducedMotion();
+    const onPick = vi.fn();
+    const onIronMan = vi.fn();
+    const { container, root } = renderHome(HAND_IDLE, onPick, onIronMan);
+    act(() => container.querySelector<HTMLButtonElement>('.channel.sports')!.click());
+    expect(onIronMan).toHaveBeenCalledOnce();
+    expect(onPick).not.toHaveBeenCalled();
+    act(() => root.unmount());
   });
 
   it('paints continuous fractional motion directly, exposes debug state, and cancels rAF on unmount', () => {
@@ -181,7 +132,6 @@ describe('HomeMenu rotational carousel integration', () => {
   });
 
 
-
   it('expires a stale rotating hand sample instead of driving forever', () => {
     mockReducedMotion();
     const raf = mockRaf();
@@ -211,15 +161,6 @@ describe('HomeMenu rotational carousel integration', () => {
   it('keeps one loop through a momentary hand loss and drives again without a re-render', () => {
     mockReducedMotion();
     const raf = mockRaf();
-    const rotating: HandCursorInput = {
-      ...HAND_IDLE,
-      visible: true,
-      synced: true,
-      capturedAtMs: 1000,
-      rotationPhase: 'ROTATING',
-      rotationAngularVelocity: 180,
-      rotationDirection: 1,
-    };
     const { container, root, handStore } = renderHome(HAND_IDLE);
     const firstChannel = container.querySelector<HTMLElement>('.channel')!;
     act(() => {
@@ -228,13 +169,41 @@ describe('HomeMenu rotational carousel integration', () => {
     expect(firstChannel.style.left).toBe('50%');
     expect(raf.callbacks.size).toBe(1);
 
-    handStore.publish(rotating);
+    handStore.publish({
+      ...HAND_IDLE,
+      visible: true,
+      synced: true,
+      capturedAtMs: 1000,
+      rotationPhase: 'ROTATING',
+      rotationAngularVelocity: 180,
+      rotationDirection: 1,
+    });
     act(() => {
       raf.fire(1016);
       raf.fire(1032);
     });
     expect(firstChannel.style.left).not.toBe('50%');
     expect(raf.callbacks.size).toBe(1);
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it('steps one channel per swipe pulse, only from a synchronized hand', () => {
+    mockReducedMotion();
+    mockRaf();
+    const { container, root, handStore } = renderHome(HAND_IDLE);
+    const athletics = container.querySelector<HTMLElement>('[aria-label="Atletismo"]')!;
+    const tracked: HandCursorInput = { ...HAND_IDLE, visible: true, synced: true };
+    const side = athletics.style.left;
+
+    act(() => handStore.publish({ ...tracked, synced: false, swipeDirection: 1 }));
+    expect(athletics.style.left).toBe(side);
+    act(() => handStore.publish({ ...tracked, swipeDirection: 1 }));
+    expect(athletics.style.left).toBe('50%');
+    act(() => handStore.publish(tracked));
+    act(() => handStore.publish({ ...tracked, swipeDirection: -1 }));
+    expect(athletics.style.left).toBe(side);
     act(() => {
       root.unmount();
     });

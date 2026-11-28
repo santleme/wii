@@ -15,6 +15,8 @@ export class PoseWorkerSession {
   private readonly readyPromise: Promise<void>;
   private requestId = 1;
   private effectiveDelegate: Delegate;
+  /** Delegates that actually produced collected samples; worker messages arrive in emission order. */
+  private readonly sampledDelegates = new Set<Delegate>();
 
   constructor(private readonly worker: Worker, preferredDelegate: Delegate) {
     this.effectiveDelegate = preferredDelegate;
@@ -30,8 +32,28 @@ export class PoseWorkerSession {
     return this.effectiveDelegate;
   }
 
-  async initialize(wasmBaseUrl: string, modelUrl: string): Promise<Delegate> {
-    this.worker.postMessage({ type: 'INIT', delegate: this.effectiveDelegate, wasmBaseUrl, modelUrl } satisfies WorkerRequest);
+  get hasMixedConfigurationSamples(): boolean {
+    return this.sampledDelegates.size > 1;
+  }
+
+  /** The delegate that produced every collected sample, or undefined when nothing was collected yet. */
+  get sampledDelegate(): Delegate | undefined {
+    return this.sampledDelegates.size === 1 ? [...this.sampledDelegates][0] : undefined;
+  }
+
+  assertSingleConfigurationRun(): void {
+    if (!this.hasMixedConfigurationSamples) return;
+    throw new Error('Pose samples span both GPU and CPU; this mixed-configuration replay cannot be used as a single-configuration reference. Rerun with a healthy GPU or choose CPU from the start.');
+  }
+
+  async initialize(wasmBaseUrl: string, modelUrl: string, cpuModelUrl?: string): Promise<Delegate> {
+    this.worker.postMessage({
+      type: 'INIT',
+      delegate: this.effectiveDelegate,
+      wasmBaseUrl,
+      modelUrl,
+      ...(cpuModelUrl ? { cpuModelUrl } : {}),
+    } satisfies WorkerRequest);
     let timeout: number | undefined;
     try {
       await Promise.race([
@@ -100,6 +122,7 @@ export class PoseWorkerSession {
     } else if (message.type === 'POSE') {
       const pending = this.pending.get(message.requestId);
       if (!pending) return;
+      this.sampledDelegates.add(this.effectiveDelegate);
       window.clearTimeout(pending.timeout);
       this.pending.delete(message.requestId);
       pending.resolve(message);

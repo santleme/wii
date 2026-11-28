@@ -1,14 +1,22 @@
 import { createPoseRecording, parsePoseRecording } from '@wii/spatial-core';
 import type { Point3, PoseRecording, PoseSnapshot, WorkerReply } from '@wii/spatial-core';
-import { MEDIAPIPE_WASM_VERSION, POSE_MODEL_SHA8 } from '../src/cv/mediapipeAssets';
+import { MEDIAPIPE_WASM_VERSION } from '../src/cv/mediapipeAssets';
+import { type PoseReplayModelChoice, poseReplayModelFiles } from './poseReplayAssets';
+import { delegateContext, incompatibleReasons } from './poseReplayCompare';
 import { PoseWorkerSession } from './poseReplaySession';
 import { seekVideoTo, waitForVideoFrame } from './poseReplayVideo';
 
-const SAMPLE_STEP_MS = 100;
+const query = new URLSearchParams(location.search);
+const requestedFps = Number(query.get('fps') ?? '30');
+/** Default to the rate the game's detectors see; external clips may need their native cadence. */
+const SAMPLE_FPS = Number.isFinite(requestedFps) && requestedFps > 0 ? Math.min(60, requestedFps) : 30;
+const SAMPLE_STEP_MS = 1000 / SAMPLE_FPS;
+const EVAL_MODE = query.has('eval');
 const MAX_CLIP_BYTES = 256 * 1024 * 1024;
 const videoInput = document.querySelector<HTMLInputElement>('#video-file')!;
 const referenceInput = document.querySelector<HTMLInputElement>('#reference-file')!;
 const delegateInput = document.querySelector<HTMLSelectElement>('#delegate')!;
+const modelInput = document.querySelector<HTMLSelectElement>('#model')!;
 const imageToleranceInput = document.querySelector<HTMLInputElement>('#image-tolerance')!;
 const worldToleranceInput = document.querySelector<HTMLInputElement>('#world-tolerance')!;
 const confidenceToleranceInput = document.querySelector<HTMLInputElement>('#confidence-tolerance')!;
@@ -22,7 +30,8 @@ let activeWorker: Worker | undefined;
 let currentUrl: string | undefined;
 
 function confidence(points: readonly Point3[]): number {
-  const indices = [11, 12, 23, 24];
+  // Same anchor as the live client: the shoulders.
+  const indices = [11, 12];
   if (indices.some((index) => !points[index])) return 0;
   return Math.min(...indices.map((index) => {
     const point = points[index]!;
@@ -47,11 +56,7 @@ async function sha256(data: ArrayBuffer): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function modelAssets() {
-  const sumsResponse = await fetch('/mediapipe/models/SHA256SUMS');
-  if (!sumsResponse.ok) throw new Error('Could not read the local MediaPipe model checksum manifest.');
-  const sums = await sumsResponse.text();
-  const modelName = `pose_landmarker_lite.${POSE_MODEL_SHA8}.task`;
+async function verifiedModel(sums: string, modelName: string) {
   const expectedHash = sums.split(/\r?\n/).find((line) => line.trim().endsWith(modelName))?.trim().split(/\s+/)[0];
   if (!expectedHash) throw new Error(`Model ${modelName} is not listed in SHA256SUMS.`);
   const modelUrl = new URL(`/mediapipe/models/${modelName}`, location.origin).href;
@@ -59,10 +64,22 @@ async function modelAssets() {
   if (!modelResponse.ok) throw new Error(`Could not fetch local model (${modelResponse.status}).`);
   const actualHash = await sha256(await modelResponse.arrayBuffer());
   if (actualHash !== expectedHash) throw new Error('Local pose model does not match SHA256SUMS.');
+  return { modelUrl, modelSha256: actualHash };
+}
+
+async function modelAssets(delegate: 'CPU' | 'GPU', choice: PoseReplayModelChoice) {
+  const sumsResponse = await fetch('/mediapipe/models/SHA256SUMS');
+  if (!sumsResponse.ok) throw new Error('Could not read the local MediaPipe model checksum manifest.');
+  const sums = await sumsResponse.text();
+  const files = poseReplayModelFiles(delegate, choice);
+  const primary = await verifiedModel(sums, files.modelFile);
+  const cpu = files.cpuModelFile === files.modelFile ? primary : await verifiedModel(sums, files.cpuModelFile);
   return {
     wasmBaseUrl: new URL(`/mediapipe/wasm-${MEDIAPIPE_WASM_VERSION}`, location.origin).href,
-    modelUrl,
-    modelSha256: actualHash,
+    modelUrl: primary.modelUrl,
+    cpuModelUrl: cpu.modelUrl,
+    modelSha256: primary.modelSha256,
+    cpuModelSha256: cpu.modelSha256,
   };
 }
 
@@ -80,29 +97,6 @@ function loadVideo(file: File): Promise<void> {
 
 async function readReference(file: File): Promise<PoseRecording> {
   return parsePoseRecording(await file.text());
-}
-
-function incompatibleReasons(reference: PoseRecording, actual: PoseRecording): string[] {
-  const reasons: string[] = [];
-  const expectedSource = reference.source;
-  const actualSource = actual.source;
-  if (expectedSource.kind !== 'mediapipe') reasons.push('reference source is not MediaPipe');
-  if (expectedSource.tasksVisionVersion !== actualSource.tasksVisionVersion) reasons.push('MediaPipe Tasks version differs');
-  if (expectedSource.modelSha256 !== actualSource.modelSha256) reasons.push('pose model checksum differs');
-  if (expectedSource.delegate !== actualSource.delegate) reasons.push('delegate differs');
-  if (expectedSource.runningMode !== 'VIDEO') reasons.push('reference was not captured in VIDEO mode');
-  if (reference.timestampClock !== actual.timestampClock) reasons.push('timestamp clock domain differs');
-  if (expectedSource.runtime?.userAgent !== actualSource.runtime?.userAgent) reasons.push('browser user agent differs');
-  if (expectedSource.runtime?.platform !== actualSource.runtime?.platform) reasons.push('browser platform differs');
-  if (expectedSource.input?.sha256 !== actualSource.input?.sha256) reasons.push('input video checksum differs');
-  if (expectedSource.input?.width !== actualSource.input?.width || expectedSource.input?.height !== actualSource.input?.height) {
-    reasons.push('input video dimensions differ');
-  }
-  if (reference.frameCount !== actual.frameCount) reasons.push('sampled frame count differs');
-  if (reference.frames.some((frame, index) => frame.snapshot.timestampMs !== actual.frames[index]?.snapshot.timestampMs)) {
-    reasons.push('sampled frame timestamps differ');
-  }
-  return reasons;
 }
 
 function errors(reference: PoseRecording, actual: PoseRecording) {
@@ -166,12 +160,12 @@ async function run(): Promise<void> {
   const reference = referenceFile ? await readReference(referenceFile) : undefined;
   await loadVideo(videoFile);
   const videoHash = await sha256(await videoFile.arrayBuffer());
-  const model = await modelAssets();
+  const requestedDelegate = delegateInput.value as 'CPU' | 'GPU';
+  const model = await modelAssets(requestedDelegate, modelInput.value as PoseReplayModelChoice);
   const worker = new Worker(new URL('../packages/core/src/providers/pose.worker.ts', import.meta.url), { type: 'module' });
   activeWorker = worker;
-  const requestedDelegate = delegateInput.value as 'CPU' | 'GPU';
   const session = new PoseWorkerSession(worker, requestedDelegate);
-  await session.initialize(model.wasmBaseUrl, model.modelUrl);
+  await session.initialize(model.wasmBaseUrl, model.modelUrl, model.cpuModelUrl);
   const snapshots: PoseSnapshot[] = [];
   let droppedFrameCount = 0;
   const frameCount = Math.floor((video.duration * 1000) / SAMPLE_STEP_MS) + 1;
@@ -179,8 +173,12 @@ async function run(): Promise<void> {
   for (let sequence = 0; sequence < frameCount; sequence += 1) {
     const timestampMs = sequence * SAMPLE_STEP_MS;
     await seekVideoTo(video, timestampMs / 1000);
-    const bitmap = await createImageBitmap(video, { resizeWidth: 640, resizeQuality: 'low' });
+    // Resized exactly as the live client does it.
+    const bitmap = video.videoWidth > 640
+      ? await createImageBitmap(video, { resizeWidth: 640, resizeQuality: 'medium' })
+      : await createImageBitmap(video);
     const reply = await session.detect(bitmap, timestampMs);
+    session.assertSingleConfigurationRun();
     if (!reply) {
       droppedFrameCount += 1;
       report.textContent = `Processed ${sequence + 1}/${frameCount} sampled frames (${droppedFrameCount} dropped)…`;
@@ -195,9 +193,10 @@ async function run(): Promise<void> {
   currentRecording = createPoseRecording(snapshots, {
     kind: 'mediapipe',
     tasksVisionVersion: MEDIAPIPE_WASM_VERSION,
-    modelSha256: model.modelSha256,
-    delegate: session.delegate,
+    modelSha256: (session.sampledDelegate ?? session.delegate) === 'CPU' ? model.cpuModelSha256 : model.modelSha256,
+    delegate: session.sampledDelegate ?? session.delegate,
     runningMode: 'VIDEO',
+    samplingFps: SAMPLE_FPS,
     droppedFrameCount,
     runtime: { userAgent: navigator.userAgent, platform: navigator.platform },
     input: {
@@ -208,13 +207,14 @@ async function run(): Promise<void> {
       sha256: videoHash,
     },
   }, 'media-time');
+  if (EVAL_MODE) (window as Window & { POSE_RECORDING?: PoseRecording }).POSE_RECORDING = currentRecording;
   downloadButton.disabled = false;
 
   if (!reference) {
     const result = {
       status: 'recorded',
       message: 'This run can be downloaded as a reference. Re-run with that JSON selected to compare future inference.',
-      sampling: { stepMs: SAMPLE_STEP_MS, frameCount, videoDurationMs: video.duration * 1000 },
+      sampling: { fps: SAMPLE_FPS, stepMs: SAMPLE_STEP_MS, frameCount, videoDurationMs: video.duration * 1000 },
       runtime: currentRecording.source,
     };
     (window as Window & { POSE_REGRESSION?: unknown }).POSE_REGRESSION = result;
@@ -232,7 +232,8 @@ async function run(): Promise<void> {
   const result = {
     status: reasons.length > 0 ? 'incomparable' : !hasValues ? 'inconclusive' : passed ? 'pass' : 'fail',
     comparison: reasons,
-    sampling: { stepMs: SAMPLE_STEP_MS, frameCount, videoDurationMs: video.duration * 1000 },
+    delegates: delegateContext(requestedDelegate, currentRecording, reference),
+    sampling: { fps: SAMPLE_FPS, stepMs: SAMPLE_STEP_MS, frameCount, videoDurationMs: video.duration * 1000 },
     tolerance: {
       imageCoordinateMaxAbs: imageTolerance,
       worldCoordinateMaxAbsMeters: worldTolerance,

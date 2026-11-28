@@ -35,6 +35,44 @@ export class ProceduralAudio {
     osc.start(now); osc.stop(now + 0.17);
   }
 
+  /** Racket on ball: a bright click of strings over the body of the hit. */
+  racket(power = 0.5): void {
+    this.hit(power);
+    this.noise(0.05, 0.25 + 0.2 * power, 2600);
+  }
+
+  /** A short burst of applause. */
+  cheer(intensity = 1): void {
+    for (let clap = 0; clap < 40 * intensity; clap += 1) this.noise(0.04, 0.03 + Math.random() * 0.05, 1500 + Math.random() * 1500, Math.random() * 1.4);
+  }
+
+  /** The umpire's call, in the browser's own voice; silent where there is none. */
+  say(text: string): void {
+    if (this.muted || typeof speechSynthesis === 'undefined') return;
+    speechSynthesis.cancel();
+    const call = new SpeechSynthesisUtterance(text);
+    call.lang = 'pt-BR';
+    call.rate = 1.1;
+    speechSynthesis.speak(call);
+  }
+
+  private noise(duration: number, volume: number, frequency: number, delay = 0): void {
+    if (!this.context || this.muted) return;
+    const startAt = this.context.currentTime + delay;
+    const buffer = this.context.createBuffer(1, Math.ceil(this.context.sampleRate * duration), this.context.sampleRate);
+    const samples = buffer.getChannelData(0);
+    for (let i = 0; i < samples.length; i += 1) samples[i] = (Math.random() * 2 - 1) * (1 - i / samples.length);
+    const source = this.context.createBufferSource();
+    source.buffer = buffer;
+    const filter = this.context.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = frequency;
+    const gain = this.context.createGain();
+    gain.gain.value = volume;
+    source.connect(filter).connect(gain).connect(this.context.destination);
+    source.start(startAt);
+  }
+
   jump(): void { this.hit(0.25); }
 
   step(side: 'left' | 'right'): void {

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   applyLatePunch,
+  BODY_DAMAGE_MULTIPLIER,
+  COUNTER_MULTIPLIER,
+  HOOK_GUARD_PENETRATION,
+  UPPERCUT_OPEN_MULTIPLIER,
   applyOpponentPunch,
   applyPlayerPunch,
   type BoxingState,
@@ -109,6 +113,18 @@ describe('applyLatePunch', () => {
     expect(applyLatePunch(decided, 1, 'guard').state.winner).toBe('opponent');
   });
 
+  it('keeps the kind and target of a pre-bell punch confirmed after the bell', () => {
+    const preBell = { playerHp: 90, opponentHp: 100, round: 3, roundMsLeft: 1 } as const;
+    for (const [kind, target, opening] of [
+      ['hook', 'head', 'guard'], ['straight', 'body', 'guard'], ['uppercut', 'head', 'open'],
+    ] as const) {
+      const onTime = applyPlayerPunch(preBell, 1, opening, false, kind, target);
+      const late = applyLatePunch(decided, 1, opening, false, kind, target);
+      expect(late.damage).toBe(onTime.damage);
+      expect(late.state.opponentHp).toBe(onTime.state.opponentHp);
+    }
+  });
+
   it('never reopens a knockout, even one landed as the clock ran out', () => {
     const knockout = { ...decided, playerHp: 0 };
     expect(applyLatePunch(knockout, 1, 'open')).toMatchObject({ damage: 0, state: knockout });
@@ -131,5 +147,38 @@ describe('counter and guard', () => {
     expect(applyOpponentPunch(createBoxing(), { dodged: false, guarded: true }).damage).toBe(1);
     expect(applyOpponentPunch(createBoxing(), { dodged: true, guarded: true }).damage).toBe(0);
     expect(applyOpponentPunch(createBoxing(), { dodged: false }).damage).toBe(10);
+  });
+});
+describe('typed player punches', () => {
+  it('hook partially penetrates the guard', () => {
+    const result = applyPlayerPunch(createBoxing(), 1, 'guard', false, 'hook', 'head');
+    expect(result.damage).toBe(Math.round(12 * HOOK_GUARD_PENETRATION));
+  });
+
+  it('body punches ignore the high guard but hit softer', () => {
+    const result = applyPlayerPunch(createBoxing(), 1, 'guard', false, 'straight', 'body');
+    expect(result.damage).toBe(Math.round(12 * BODY_DAMAGE_MULTIPLIER));
+  });
+
+  it('body punches into an opening also hit softer', () => {
+    const result = applyPlayerPunch(createBoxing(), 1, 'open', false, 'straight', 'body');
+    expect(result.damage).toBe(Math.round(12 * BODY_DAMAGE_MULTIPLIER));
+  });
+
+  it('uppercut into an opening hits harder; into a guard it does not', () => {
+    expect(applyPlayerPunch(createBoxing(), 1, 'open', false, 'uppercut', 'head').damage)
+      .toBe(Math.round(12 * UPPERCUT_OPEN_MULTIPLIER));
+    expect(applyPlayerPunch(createBoxing(), 1, 'guard', false, 'uppercut', 'head').damage).toBe(0);
+  });
+
+  it('unknown type and target keep the legacy behavior exactly', () => {
+    expect(applyPlayerPunch(createBoxing(), 1, 'guard', false, 'unknown', 'unknown').damage).toBe(0);
+    expect(applyPlayerPunch(createBoxing(), 1, 'open', false, 'unknown', 'unknown').damage).toBe(12);
+    expect(applyPlayerPunch(createBoxing(), 1, 'guard').damage).toBe(0);
+  });
+
+  it('counter still goes through the guard at full multiplied damage', () => {
+    const result = applyPlayerPunch(createBoxing(), 1, 'guard', true, 'straight', 'head');
+    expect(result.damage).toBe(Math.round(12 * COUNTER_MULTIPLIER));
   });
 });

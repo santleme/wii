@@ -18,6 +18,8 @@ export function pose(timestampMs: number, options: {
   // Facing the camera, the player's right is toward image left — x decreases in the raw frame.
   const shift = (options.shiftUserRightSw ?? 0) * 0.14;
   const hipY = 0.55 - (options.hipRise ?? 0) * 0.4;
+  // The head rides on the torso, as a real one does.
+  points[0] = { ...points[0]!, x: 0.5 - shift, y: hipY - 0.48 };
   points[11] = { ...points[11]!, x: 0.43 - shift, y: hipY - 0.4 };
   points[12] = { ...points[12]!, x: 0.57 - shift, y: hipY - 0.4 };
   points[23] = { ...points[23]!, x: 0.46 - shift, y: hipY };
@@ -28,6 +30,9 @@ export function pose(timestampMs: number, options: {
   points[28] = { ...points[28]!, x: 0.54, y: hipY + 0.4 };
   points[15] = { ...points[15]!, x: 0.39 - shift, y: hipY - 0.12 };
   points[16] = { ...points[16]!, x: 0.61 - shift, y: hipY - 0.12 };
+  // The same wrist motion in the image, exaggerated so that 0.3 reads as a full stroke (two shoulder widths).
+  points[15] = { ...points[15]!, x: points[15]!.x - (options.leftWristLateral ?? 0) };
+  points[16] = { ...points[16]!, x: points[16]!.x - (options.wristLateral ?? 0), y: points[16]!.y - (options.wristVertical ?? 0) * 0.62 };
   options.hiddenLandmarks?.forEach((index) => {
     if (points[index]) points[index] = { ...points[index]!, visibility: 0, presence: 0 };
   });
@@ -84,10 +89,10 @@ export function calibration(): CalibrationProfile {
   };
 }
 
-/** Translates the torso core (shoulders + hips) vertically in image space, torso height unchanged. */
-export function poseWithHipBounce(timestampMs: number, hipYOffset: number, confidence?: number) {
+/** Translates the torso core (shoulders + hips) in image space, torso height unchanged. */
+export function poseWithHipBounce(timestampMs: number, hipYOffset: number, confidence?: number, hipXOffset = 0) {
   const snapshot = pose(timestampMs, { confidence });
   const landmarks = snapshot.landmarks.map((point, index) =>
-    [11, 12, 23, 24].includes(index) ? { ...point, y: point.y + hipYOffset } : point);
+    [0, 11, 12, 23, 24].includes(index) ? { ...point, y: point.y + hipYOffset, x: point.x + hipXOffset } : point);
   return { ...snapshot, landmarks };
 }

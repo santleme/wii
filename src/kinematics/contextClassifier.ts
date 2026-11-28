@@ -1,4 +1,4 @@
-import type { CalibrationProfile, PoseSnapshot } from '../cv/protocol';
+import type { CalibrationProfile, PoseSnapshot } from '@wii/spatial-core';
 import { BodyFeatureExtractor, type CanonicalBodyFeatures } from './bodyFeatures';
 import { clamp } from './math';
 

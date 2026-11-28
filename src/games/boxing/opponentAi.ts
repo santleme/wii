@@ -5,7 +5,7 @@
  * per `stepOpponent` call. Time and `rng` (a `() => number` in [0, 1)) are injected,
  * and rolls are consumed in a fixed order:
  * - `createOpponentAi`: (1) guard duration.
- * - guard -> windup: (1) hand, (2) windup duration.
+ * - guard -> windup: (1) hand, (2) windup duration, (3) attack kind, (4) target height.
  * - windup -> recover: none.
  * - recover -> guard: (1) guard duration.
  * - a step without a transition: none.
@@ -17,7 +17,7 @@
  * cannot stunlock the opponent.
  */
 
-import type { Hand } from '../../cv/protocol';
+import type { Hand, PunchKind, PunchTargetZone } from '../../cv/protocol';
 
 /** Lateral position of the player: left, center, right. */
 export type Zone = -1 | 0 | 1;
@@ -25,7 +25,7 @@ export type { Hand };
 
 export type OpponentPhase =
   | { readonly kind: 'guard'; readonly untilMs: number }
-  | { readonly kind: 'windup'; readonly hand: Hand; readonly targetZone: Zone; readonly impactAtMs: number }
+  | { readonly kind: 'windup'; readonly hand: Hand; readonly targetZone: Zone; readonly impactAtMs: number; readonly attackKind: Exclude<PunchKind, 'unknown'>; readonly target: Exclude<PunchTargetZone, 'unknown'> }
   | { readonly kind: 'recover'; readonly untilMs: number };
 
 export interface OpponentAiState {
@@ -40,6 +40,8 @@ export interface OpponentAttack {
   readonly hand: Hand;
   readonly targetZone: Zone;
   readonly impactAtMs: number;
+  readonly attackKind: Exclude<PunchKind, 'unknown'>;
+  readonly target: Exclude<PunchTargetZone, 'unknown'>;
 }
 
 export interface OpponentStep {
@@ -93,26 +95,47 @@ export function createOpponentAi(nowMs: number, rng: () => number, skill = DEFAU
  * `impactAtMs + IMPACT_GRACE_MS`; the caller collects the player's zones over
  * [impactAtMs, impactAtMs + IMPACT_GRACE_MS] and judges them with `isDodged`.
  */
-export function stepOpponent(state: OpponentAiState, nowMs: number, playerZone: Zone, rng: () => number): OpponentStep {
+export interface OpponentObservation {
+  readonly inRange: boolean;
+  readonly playerGuarding: boolean;
+  readonly style: 'rookie' | 'aggressive' | 'technical';
+  /** Confirmed outcomes only, bounded to recent attacks by the caller. */
+  readonly habits?: { readonly samples: number; readonly slips: number; readonly ducks: number };
+}
+
+export function stepOpponent(state: OpponentAiState, nowMs: number, playerZone: Zone, rng: () => number, observation?: OpponentObservation): OpponentStep {
   const { phase, skill } = state;
   switch (phase.kind) {
     case 'guard': {
-      if (nowMs < phase.untilMs) return { state };
+      if (nowMs < phase.untilMs || observation?.inRange === false) return { state };
       const hand: Hand = rng() < 0.5 ? 'left' : 'right';
       // Skill takes up to 200 ms off and jitter up to 100 ms, so the result stays in range.
       const durationMs =
         WINDUP_MAX_MS - skill * (WINDUP_MAX_MS - WINDUP_MIN_MS - WINDUP_JITTER_MS) - rng() * WINDUP_JITTER_MS;
+      const kindRoll = rng();
+      // A pattern must be repeated before it influences the next legal action. Exploration
+      // remains possible: the smallest action share is 10%, even for a strong pattern.
+      const habits = observation?.habits;
+      const slip = habits && habits.samples >= 3 ? habits.slips / habits.samples : 0;
+      const duck = habits && habits.samples >= 3 ? habits.ducks / habits.samples : 0;
+      const baseStraight = observation?.style === 'technical' ? 0.65 : observation?.style === 'aggressive' ? 0.35 : 0.5;
+      const straightThreshold = Math.max(0.1, baseStraight - 0.2 * Math.max(slip, duck));
+      const hookShare = Math.min(0.8 - straightThreshold, 0.3 + 0.3 * slip);
+      const attackKind = kindRoll < straightThreshold ? 'straight' : kindRoll < straightThreshold + hookShare ? 'hook' : 'uppercut';
+      // The player's guard protects both heights equally; do not pretend body targets bypass it.
+      const headChance = observation?.style === 'aggressive' ? 0.8 : 0.7;
+      const target = rng() < headChance ? 'head' : 'body';
       return {
-        state: enter(state, { kind: 'windup', hand, targetZone: playerZone, impactAtMs: nowMs + durationMs }, nowMs),
+        state: enter(state, { kind: 'windup', hand, targetZone: playerZone, impactAtMs: nowMs + durationMs, attackKind, target }, nowMs),
       };
     }
     case 'windup': {
       if (nowMs < phase.impactAtMs + IMPACT_GRACE_MS) return { state };
-      const { hand, targetZone, impactAtMs } = phase;
+      const { hand, targetZone, impactAtMs, attackKind, target } = phase;
       const untilMs = nowMs + lerp(RECOVER_SLOW_MS, RECOVER_FAST_MS, skill);
       return {
         state: enter(state, { kind: 'recover', untilMs }, nowMs),
-        attack: { hand, targetZone, impactAtMs },
+        attack: { hand, targetZone, impactAtMs, attackKind, target },
       };
     }
     case 'recover': {
@@ -131,4 +154,30 @@ export function openingAt(state: OpponentAiState, atMs: number): 'open' | 'guard
 /** True if any sample shows the player outside `targetZone`; no samples means not dodged. */
 export function isDodged(targetZone: Zone, zonesDuringImpact: readonly Zone[]): boolean {
   return zonesDuringImpact.some((zone) => zone !== targetZone);
+}
+
+/**
+ * The defense matrix, kept deliberately small and memorable:
+ * - straight to the head: slip or duck;
+ * - straight to the body: neither slip nor duck — step back out of range or guard;
+ * - hook: duck (a slip does not move the head out of the arc);
+ * - uppercut: slip — ducking into it never helps;
+ * - anything else must be guarded or stepped out of range.
+ */
+export function isDodgedTyped(
+  attack: Pick<OpponentAttack, 'attackKind' | 'target' | 'targetZone'>,
+  zonesDuringImpact: readonly Zone[],
+  duckedDuringImpact: readonly boolean[],
+): boolean {
+  const slipped = isDodged(attack.targetZone, zonesDuringImpact);
+  const ducked = duckedDuringImpact.some(Boolean);
+  switch (attack.attackKind) {
+    case 'straight':
+      if (attack.target === 'body') return false;
+      return slipped || ducked;
+    case 'hook':
+      return ducked;
+    case 'uppercut':
+      return slipped;
+  }
 }

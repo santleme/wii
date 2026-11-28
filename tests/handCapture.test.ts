@@ -87,7 +87,7 @@ describe('HandClient capture loop', () => {
     vi.stubGlobal('createImageBitmap', createImageBitmapMock);
 
     const client = makeClient();
-    await client.init({ onStatus: vi.fn() });
+    await client.init({ onStatus: vi.fn() }, 'GPU');
     const worker = FakeWorker.instance!;
     const video = makeVideo();
     const onHand = vi.fn();
@@ -127,7 +127,7 @@ describe('HandClient capture loop', () => {
     );
 
     const client = makeClient();
-    await client.init({ onStatus: vi.fn() });
+    await client.init({ onStatus: vi.fn() }, 'GPU');
     const worker = FakeWorker.instance!;
     const video = makeVideo();
     client.beginCapture(video, vi.fn());
@@ -148,7 +148,7 @@ describe('HandClient capture loop', () => {
     vi.stubGlobal('VideoFrame', videoFrame);
 
     const client = makeClient();
-    await client.init({ onStatus: vi.fn() });
+    await client.init({ onStatus: vi.fn() }, 'GPU');
     FakeWorker.instance!.reply({ type: 'FALLBACK', from: 'GPU', to: 'CPU', reason: 'slow' });
     const video = makeVideo();
     client.beginCapture(video, vi.fn());
@@ -174,7 +174,7 @@ describe('HandClient capture loop', () => {
     });
 
     const client = makeClient();
-    await client.init({ onStatus: vi.fn() });
+    await client.init({ onStatus: vi.fn() }, 'GPU');
     const worker = FakeWorker.instance!;
     const video = makeVideo();
     client.beginCapture(video, vi.fn());
@@ -209,7 +209,7 @@ describe('HandClient capture loop', () => {
     }));
 
     const client = makeClient();
-    await client.init({ onStatus: vi.fn() });
+    await client.init({ onStatus: vi.fn() }, 'GPU');
     const worker = FakeWorker.instance!;
     const video = makeVideo();
     const onError = vi.fn();
@@ -244,7 +244,7 @@ describe('HandClient capture loop', () => {
     vi.stubGlobal('createImageBitmap', createImageBitmapMock);
 
     const client = makeClient();
-    await client.init({ onStatus: vi.fn() });
+    await client.init({ onStatus: vi.fn() }, 'GPU');
     const worker = FakeWorker.instance!;
     const video = {
       readyState: HTMLMediaElement.HAVE_CURRENT_DATA,

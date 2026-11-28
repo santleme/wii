@@ -13,7 +13,7 @@
       "!!.omx",
       "!!.omc",
       "!!src/.omc",
-      "!!draw-site"
+      "!!draw-site", "!tests/recordings"
     ]
   },
   "formatter": {
@@ -31,6 +31,98 @@
       }
     }
   },
+  "overrides": [
+    {
+      "includes": ["src/kinematics/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@mediapipe/tasks-vision": "Kinematics must stay independent of browser inference runtimes.",
+                  "@wii/spatial-core": {
+                    "allowImportNames": [
+                      "CalibrationProfile",
+                      "ContinuousControls",
+                      "Hand",
+                      "OneEuroFilter",
+                      "OneEuroOptions",
+                      "PalmBasis",
+                      "Point3",
+                      "PoseSnapshot",
+                      "PunchKind",
+                      "PunchMeasurement",
+                      "PunchTargetZone",
+                      "PunchTrajectorySample",
+                      "RotationalFlickDetector",
+                      "RotationalFlickOptions",
+                      "RotationalFlickPhase",
+                      "RotationalFlickRejection",
+                      "RotationalFlickState",
+                      "RotationalHandShape",
+                      "SportActionEvent",
+                      "TrackingState"
+                    ],
+                    "message": "Kinematics may use spatial-core data contracts, canonical pure detectors and OneEuroFilter."
+                  },
+                  "react": "Kinematics must stay independent of the UI.",
+                  "react-dom": "Kinematics must stay independent of the UI.",
+                  "three": "Kinematics must stay independent of rendering engines."
+                },
+                "patterns": [
+                  {
+                    "group": [
+                      "@mediapipe/tasks-vision/**",
+                      "@wii/spatial-core/**",
+                      "**/packages/core/**",
+                      "react/**",
+                      "react-dom/**",
+                      "three/**",
+                      "**/app/**",
+                      "**/components/**",
+                      "**/cv/**",
+                      "**/games/**",
+                      "**/pages/**",
+                      "**/ui/**",
+                      "../app/**",
+                      "../components/**",
+                      "../cv/**",
+                      "../games/**",
+                      "../pages/**",
+                      "../ui/**"
+                    ],
+                    "message": "Kinematics cannot bypass spatial-core's public API or depend on app, UI, game, renderer, or browser inference modules."
+                  }
+                ]
+              }
+            },
+            "noRestrictedGlobals": {
+              "level": "error",
+              "options": {
+                "deniedGlobals": {
+                  "CanvasRenderingContext2D": "Kinematics must not access browser rendering APIs.",
+                  "HTMLCanvasElement": "Kinematics must not access browser rendering APIs.",
+                  "HTMLVideoElement": "Kinematics must not access browser media APIs.",
+                  "ImageBitmap": "Kinematics must not access browser media APIs.",
+                  "MediaStream": "Kinematics must not access browser media APIs.",
+                  "OffscreenCanvas": "Kinematics must not access browser rendering APIs.",
+                  "performance": "Pass timestamps or timing measurements through the boundary instead of reading a global clock.",
+                  "Worker": "Kinematics must not access browser worker APIs.",
+                  "cancelAnimationFrame": "Kinematics must not schedule browser rendering work.",
+                  "document": "Kinematics must not access the browser DOM.",
+                  "navigator": "Kinematics must not access browser device APIs.",
+                  "requestAnimationFrame": "Kinematics must not schedule browser rendering work.",
+                  "window": "Kinematics must not access the browser DOM."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "javascript": {
     "formatter": {
       "quoteStyle": "single"

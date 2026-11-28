@@ -1,4 +1,4 @@
-import type { CalibrationProfile, Point3, PoseSnapshot } from '../cv/protocol';
+import type { CalibrationProfile, Point3, PoseSnapshot } from '@wii/spatial-core';
 import { type BodyBasis, bodyBasis } from './bodyFrame';
 import { OneEuroFilter } from '@wii/spatial-core';
 import { distance3, landmarkConfidence, midpoint } from './math';
@@ -162,31 +162,44 @@ export class BodyFeatureExtractor {
     }
     const leftShoulder = world[11]!;
     const rightShoulder = world[12]!;
-    const leftHip = world[23]!;
-    const rightHip = world[24]!;
-    const coreWorld = [leftShoulder, rightShoulder, leftHip, rightHip];
-    const coreImage = [image[11], image[12], image[23], image[24]];
-    const coreBad =
-      coreWorld.some((point) => !isFinitePoint(point)) ||
-      !coreWorld.every((point) => landmarkConfidence(point) >= CORE_MIN_CONFIDENCE) ||
-      coreImage.some((point) => !isFinitePoint(point)) ||
-      !coreImage.every((point) => landmarkConfidence(point!) >= CORE_MIN_CONFIDENCE);
-    if (coreBad) {
+    const leftHip = world[23];
+    const rightHip = world[24];
+    const shouldersWorld = [leftShoulder, rightShoulder];
+    const shouldersImage = [image[11], image[12]];
+    const shouldersBad =
+      shouldersWorld.some((point) => !isFinitePoint(point)) ||
+      !shouldersWorld.every((point) => landmarkConfidence(point) >= CORE_MIN_CONFIDENCE) ||
+      shouldersImage.some((point) => !isFinitePoint(point)) ||
+      !shouldersImage.every((point) => landmarkConfidence(point!) >= CORE_MIN_CONFIDENCE);
+    if (shouldersBad) {
       this.invalidateVelocityChain();
       return undefined;
     }
+    const hipsUsable =
+      isFinitePoint(leftHip) &&
+      isFinitePoint(rightHip) &&
+      landmarkConfidence(leftHip, rightHip) >= LANDMARK_MIN_CONFIDENCE &&
+      isFinitePoint(image[23]) &&
+      isFinitePoint(image[24]) &&
+      landmarkConfidence(image[23]!, image[24]!) >= LANDMARK_MIN_CONFIDENCE;
 
     // Degenerate geometry (shoulder line or torso direction collapsed) is rejected rather than
     // clamped: MIN_SCALE only guards the arithmetic, it must not manufacture plausible garbage.
-    const basis = bodyBasis(leftShoulder, rightShoulder, leftHip, rightHip);
+    const basis = bodyBasis(leftShoulder, rightShoulder, hipsUsable ? leftHip : undefined, hipsUsable ? rightHip : undefined);
     if (!basis) {
       this.invalidateVelocityChain();
       return undefined;
     }
 
     const scale = Math.max(calibration?.world.shoulderWidth ?? distance3(leftShoulder, rightShoulder), MIN_SCALE);
-    const hipMid = midpoint(leftHip, rightHip);
     const shoulderMid = midpoint(leftShoulder, rightShoulder);
+    const hipMid = hipsUsable && leftHip && rightHip
+      ? midpoint(leftHip, rightHip)
+      : {
+          x: shoulderMid.x - basis.up.x * scale * 1.25,
+          y: shoulderMid.y - basis.up.y * scale * 1.25,
+          z: shoulderMid.z - basis.up.z * scale * 1.25,
+        };
 
     const project = (point: Point3): Vec3 => {
       const relX = point.x - hipMid.x;

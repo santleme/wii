@@ -1,48 +1,79 @@
+import { BounceDetector } from './bounce';
 import { median } from './math';
 import type { TorsoVerticalSample } from './torsoVertical';
+import { WalkDetector } from './walk';
 
-export interface CadenceResult { cadenceSpm: number; speed01: number; step?: 'left' | 'right' }
+/**
+ * Running or marching in place keeps the body's weight moving sideways, even when the head and
+ * shoulders barely bounce — a player watching the screen stabilizes their upper body, and the
+ * movement is irregular drift as much as step-frequency sway. Waving the arms while standing
+ * still keeps the weight centered: real clips measure 0.02-0.03 shoulder widths of lateral
+ * spread for arm waving against 0.06-0.13 for running. The effort gate opens when vertical
+ * bounce is corroborated — either by weight transfer or by rhythmic strides: even violent arm
+ * swinging can bounce the torso, but it never shifts the body's weight nor keeps a step rhythm.
+ * Once open, either channel holds the gate through flat stretches — but weight transfer alone
+ * can only bridge a few seconds without fresh stride evidence, or a sideways shuffle would run
+ * the race. The lateral channel never drives cadence speed, so sidesteps don't sprint.
+ */
+const LATERAL_WINDOW_MS = 1000;
+const LATERAL_MIN_SPAN_MS = 500;
+/** Between the highest arm-waving stretch (0.033) and the lowest running one (0.052). */
+const LATERAL_ACTIVE_SW = 0.042;
 
-const MIN_STEP_INTERVAL_MS = 220;
-/**
- * Hard ceiling for one inter-step interval: ~33 steps/min plus margin for the frame-sampled
- * observation of a step crossing. The adaptive stop rule below ends a stepping session well
- * before this; the ceiling only keeps a very late step from reusing a stale timestamp.
- */
-const MAX_STEP_INTERVAL_MS = 1800;
-/** The player has stopped once the next step is this many periods late. */
-const STOP_AFTER_PERIODS = 1.6;
-const MAX_STOP_DELAY_MS = 1600;
-/** A long or stuck jump must not keep a stale run cadence alive indefinitely. */
-const MAX_JUMP_CADENCE_HOLD_MS = 1200;
-/**
- * Smallest torso oscillation that counts as stepping, in torsoHeights semi-amplitude.
- * Below this the motion is posture sway or estimator noise. The running literature puts real
- * bouncing at 0.11–0.29 torso peak-to-peak (semi-amplitude ~0.05–0.15); marching in place is
- * smaller but still well above this floor — the adaptive hysteresis scales with the measured
- * amplitude, so the floor only decides whether ANY stepping exists.
- */
-const MIN_OSCILLATION_TORSO = 0.012;
-/**
- * Crossing hysteresis as a fraction of the measured oscillation amplitude. Fixed bands either
- * miss small-amplitude marching or double-count noise near the band edge; scaling the band
- * with the measured amplitude keeps the crossing point at a consistent phase of each cycle.
- */
-const HYSTERESIS_RATIO = 0.35;
-/**
- * Hysteresis band limits, in torsoHeights. The floor is the noise-immunity guarantee: a full
- * Schmitt cycle needs a swing of twice the band, so noise below ~0.024 torso peak-to-peak
- * (~11 mm) can never produce a step no matter its frequency content — without it, the band
- * would shrink with the decaying amplitude envelope right after the player stops, opening a
- * window where post-exercise sway could be miscounted as steps. The ceiling keeps the band
- * crossable when the measured amplitude is very large.
- */
-const MIN_BAND_TORSO = 0.012;
-const MAX_BAND_TORSO = 0.05;
+export interface CadenceResult { cadenceSpm: number; speed01: number; step?: 'left' | 'right'; running: boolean }
+
+/** Assumed pace until two steps have been timed: a relaxed run in place. */
+const DEFAULT_SPM = 150;
+const MAX_STEP_INTERVAL_MS = 900;
+/** One missed or doubled rise must not swing the speed: the median of these decides. */
+const STEPS_AVERAGED = 7;
+const ESTABLISHED_RUN_MS = 1000;
+/** Walking pace follows the weight shifts, held below the game's running threshold (137.5 steps/min). */
+const MIN_WALK_SPM = 70;
+const MAX_WALK_SPM = 130;
 /**
  * Steps/min to game speed, interpolated. Anchors follow the CADENCE-Adults studies (100 steps/min is a
  * moderate walk; walking turns into running around 135-140). Those were measured moving forward, not in place.
  */
+/**
+ * A jolt when the player starts moving their arms can fool the bounce verdict for a frame or two
+ * (real clips: ~150 ms at 257 spm). Running is only trusted once the verdict persists this long;
+ * the trust then holds without flapping through stride gaps.
+ */
+const RUN_TRUST_MS = 300;
+/**
+ * Once trusted, the verdict survives weak patches: real running is irregular, and dropping the
+ * effort gate for a stride or two cuts the runner's speed mid-race. Closing waits this long
+ * without bounce or weight transfer. Arm waving never opens the trust in the first place, and a still body
+ * measures no effort even while the trust is open, so the long close only bridges strides.
+ */
+const RUN_TRUST_HOLD_MS = 2000;
+/**
+ * Weight transfer may bridge flat stretches between stride bursts, but not sustain the verdict
+ * alone: a sideways shuffle is lateral motion too, and without a cap it would renew the trust
+ * forever. Real flat jogging shows vertical stride evidence at least this often (the player's
+ * own clips gap at most ~4.2 s), while pure shuffling never strides again.
+ */
+const LATERAL_BRIDGE_CAP_MS = 4500;
+/**
+ * Rhythm corroborates centered running: bouncing in place with both feet shifts no weight, so
+ * the lateral channel stays quiet — but consecutive strides at running cadence are evidence
+ * violent arm swinging never produces (one flicker in eight seconds of real clips). The
+ * intervals must sit at running pace and near one another: a slow or irregular bob is not a
+ * stride however long it persists. 150 spm is a relaxed run in place; the band is generous.
+ */
+const STRIDES_CORROBORATING = 3;
+const STRIDE_MIN_SPM = 120;
+const STRIDE_MAX_INTERVAL_MS = 60_000 / STRIDE_MIN_SPM;
+const STRIDE_MIN_INTERVAL_MS = 60_000 / 260;
+/** Fastest-to-slowest ratio the corroborating strides may span — uneven bobbing is wider. */
+const STRIDE_REGULARITY = 1.6;
+/**
+ * A short sequence can average a slower bob down into the band when timing noise lands in
+ * its favor, so averaging alone earns nothing: either the latest strides each read in band, or
+ * the longer window has to agree — its quantization error shrinks with every stride added.
+ */
+const STRIDES_EXTENDED = 5;
 const SPEED_BY_CADENCE = [[40, 0.1], [100, 0.3], [137.5, 0.55], [200, 1]] as const;
 
 export function speedFromCadence(spm: number): number {
@@ -56,88 +87,146 @@ export function speedFromCadence(spm: number): number {
 }
 
 /**
- * Step cadence from the vertical oscillation of the torso: running and marching bounce the
- * torso once per step, so the oscillation frequency IS the step frequency. Self-referencing —
- * the rise is measured against the channel's own adaptive baseline, so no calibration is
- * needed. Consumes the pipeline's shared TorsoVerticalChannel sample; frames without a sample
- * still advance the stop deadline. Step side cannot be told apart from torso motion alone,
- * so left/right alternate per step; consumers only use it for the run cycle animation.
- *
- * Startup: movement begins once two steps form one interval (~1.6 periods after the bounce
- * starts — inherent to interval measurement, on par with the old knee-lift tracker). Engaging
- * mid-bounce can phase-shift the first interval; the median-of-three absorbs it within three
- * steps, and since the player is genuinely bouncing in that scenario the error is small.
+ * Whether the player runs comes from the size of the bounce; how fast comes from the time between
+ * rises. Step side cannot be told apart from torso motion, so left/right just alternate.
  */
 export class CadenceTracker {
-  private high = false;
-  private lastSteps: number[] = [];
+  private readonly bounce = new BounceDetector();
+  private readonly walk = new WalkDetector();
+  private walking = false;
+  private walkSpm = MIN_WALK_SPM;
+  private intervals: number[] = [];
   private lastStepAt = Number.NEGATIVE_INFINITY;
-  private lastStepSide?: 'left' | 'right';
-  private previous?: { rise: number; timeMs: number };
-  private pausedAt?: number;
+  private lastStepSide: 'left' | 'right' = 'right';
+  private moving = false;
+  private movingSince = Number.POSITIVE_INFINITY;
+  private trusted = false;
+  private lastMovingAt = Number.NEGATIVE_INFINITY;
+  private lastStrideAt = Number.NEGATIVE_INFINITY;
+  private lateralWindow: { t: number; x: number; width: number }[] = [];
+  private lateralActive = false;
+  private suspended = false;
+  private ranBeforeJump = false;
+  /** Whether the last rise's time is trustworthy enough to measure an interval from. */
+  private lastStepWitnessed = false;
 
-  update(sample: TorsoVerticalSample | undefined, nowMs: number, suspendCrossings = false): CadenceResult {
+  /** `suspend` (a jump in flight) holds the current verdict and ignores the airborne samples. */
+  update(sample: TorsoVerticalSample | undefined, nowMs: number, suspend = false): CadenceResult {
     let step: 'left' | 'right' | undefined;
-    let resumed = false;
-    if (suspendCrossings) {
-      this.pausedAt ??= nowMs;
-    } else if (this.pausedAt !== undefined) {
-      const pausedMs = Math.min(Math.max(0, nowMs - this.pausedAt), MAX_JUMP_CADENCE_HOLD_MS);
-      if (Number.isFinite(this.lastStepAt)) this.lastStepAt += pausedMs;
-      this.pausedAt = undefined;
-      resumed = true;
+    // A crouch before takeoff can look like running for a moment; only an established run carries
+    // through the jump. Decided once, when the jump is first seen.
+    if (suspend && !this.suspended) {
+      this.ranBeforeJump = this.moving && nowMs - this.movingSince >= ESTABLISHED_RUN_MS;
+      this.moving = this.ranBeforeJump;
     }
-    if (sample && !suspendCrossings && !resumed) {
-      const active = sample.oscillationAmplitude >= MIN_OSCILLATION_TORSO;
-      const band = Math.min(Math.max(sample.oscillationAmplitude * HYSTERESIS_RATIO, MIN_BAND_TORSO), MAX_BAND_TORSO);
-      if (!this.high && sample.rise >= band) {
-        this.high = true;
-        if (active) {
-          step = this.lastStepSide === 'left' ? 'right' : 'left';
-          // Linear interpolation of the crossing time: frame-quantized step times would
-          // dominate the interval error at high cadence (a 400 ms period is only ~12 frames).
-          let crossTime = sample.timestampMs;
-          if (this.previous && this.previous.rise < band && sample.rise > this.previous.rise) {
-            const fraction = (band - this.previous.rise) / (sample.rise - this.previous.rise);
-            crossTime = this.previous.timeMs + fraction * (sample.timestampMs - this.previous.timeMs);
-          }
-          const interval = crossTime - this.lastStepAt;
-          // A step later than the session's stop deadline opens a fresh interval window: the old
-          // cadence is dropped, but the measured interval still estimates the new pace. A step
-          // beyond the acceptance ceiling is too old to pair with, so it only re-arms the tracker.
-          const deadline = Math.min(median(this.lastSteps) * STOP_AFTER_PERIODS, MAX_STOP_DELAY_MS);
-          if (interval > deadline) this.lastSteps = [];
-          if (interval >= MIN_STEP_INTERVAL_MS && interval <= MAX_STEP_INTERVAL_MS) this.lastSteps = [...this.lastSteps, interval].slice(-3);
-          this.lastStepAt = crossTime;
-          this.lastStepSide = step;
-        }
-      } else if (this.high && sample.rise <= -band) {
-        this.high = false;
+    this.suspended = suspend;
+    let bounceCandidate = false;
+    if (suspend) { this.walk.reset(); this.walking = false; }
+    if (suspend) this.bounce.forgetJump(nowMs, this.ranBeforeJump);
+    if (sample && !suspend) {
+      this.lateralWindow.push({ t: sample.timestampMs, x: sample.shoulders.x, width: sample.shoulders.width });
+      this.lateralWindow = this.lateralWindow.filter((entry) => sample.timestampMs - entry.t <= LATERAL_WINDOW_MS);
+      const span = sample.timestampMs - this.lateralWindow[0]!.t;
+      if (span >= LATERAL_MIN_SPAN_MS && this.lateralWindow.length >= 4) {
+        const width = this.lateralWindow[Math.floor(this.lateralWindow.length / 2)]!.width;
+        const xs = this.lateralWindow.map((entry) => entry.x);
+        const meanX = xs.reduce((sum, x) => sum + x, 0) / xs.length;
+        const rms = Math.sqrt(xs.reduce((sum, x) => sum + (x - meanX) ** 2, 0) / xs.length) / width;
+        if (rms >= LATERAL_ACTIVE_SW) this.lateralActive = true;
+        else if (rms < 0.036) this.lateralActive = false;
       }
-      this.previous = { rise: sample.rise, timeMs: sample.timestampMs };
-    } else if (sample && resumed) {
-      const band = Math.min(Math.max(sample.oscillationAmplitude * HYSTERESIS_RATIO, MIN_BAND_TORSO), MAX_BAND_TORSO);
-      if (sample.rise >= band) this.high = true;
-      else if (sample.rise <= -band) this.high = false;
-      this.previous = { rise: sample.rise, timeMs: sample.timestampMs };
+      const bounce = this.bounce.update(sample.timestampMs, sample.shoulders.left, sample.shoulders.right, sample.shoulders.width, sample.shoulders.head);
+      bounceCandidate = bounce.candidate;
+      // Right after a jump the window is still filling; the run it interrupted carries on meanwhile.
+      this.moving = bounce.moving;
+      if (bounce.rise) {
+        const interval = bounce.riseAt - this.lastStepAt;
+        // After a pause the old pace says nothing about the new one. An interval measured from an
+        // unwitnessed rise spans an unknown part of a stride — it starts late, so a slower bob
+        // would read deceptively fast.
+        if (interval > MAX_STEP_INTERVAL_MS) this.intervals = [];
+        else if (this.lastStepWitnessed) this.intervals = [...this.intervals, interval].slice(-STEPS_AVERAGED);
+        this.lastStepAt = bounce.riseAt;
+        this.lastStepWitnessed = bounce.witnessed;
+        if (this.moving) {
+          this.lastStepSide = this.lastStepSide === 'left' ? 'right' : 'left';
+          step = this.lastStepSide;
+        }
+      }
+      const { left, right, width, x } = sample.shoulders;
+      const { head } = sample.shoulders;
+      const walk = this.walk.update(sample.timestampMs, x, Number.isFinite(head) ? head : (left + right) / 2, width);
+      this.walking = walk.walking;
+      if (walk.walking && walk.spm > 0) {
+        const spm = Math.min(MAX_WALK_SPM, Math.max(MIN_WALK_SPM, walk.spm));
+        // Eased so a change of pace does not jerk the runner.
+        this.walkSpm += (spm - this.walkSpm) * 0.08;
+      }
+      if (walk.step && !this.moving) {
+        this.lastStepSide = this.lastStepSide === 'left' ? 'right' : 'left';
+        step = this.lastStepSide;
+      }
+    } else if (!suspend) {
+      this.moving = this.bounce.isMoving(nowMs);
+      this.walking = false;
     }
-    // One interval (two steps) is enough to start moving. A late step slows the pace before it stops it.
-    const period = median(this.lastSteps);
-    const suspendedMs = suspendCrossings && this.pausedAt !== undefined
-      ? Math.min(Math.max(0, nowMs - this.pausedAt), MAX_JUMP_CADENCE_HOLD_MS)
-      : 0;
-    const elapsed = nowMs - this.lastStepAt - suspendedMs;
-    const moving = period > 0 && elapsed <= Math.min(period * STOP_AFTER_PERIODS, MAX_STOP_DELAY_MS);
-    const cadenceSpm = moving ? 60_000 / Math.max(period, elapsed) : 0;
-    return { cadenceSpm, speed01: speedFromCadence(cadenceSpm), step };
+    // A rise long gone says nothing now; without this the stale history would corroborate any
+    // single torso jolt back into running. The pace estimate keeps resetting on the next rise.
+    if (nowMs - this.lastStepAt > MAX_STEP_INTERVAL_MS) this.intervals = [];
+    this.movingSince = this.moving ? Math.min(this.movingSince, nowMs) : Number.POSITIVE_INFINITY;
+    if (this.moving) this.lastStrideAt = nowMs;
+    // Sustained weight transfer with any vertical bounce at all is running; only lateral sway with a
+    // truly flat torso must hit the bridge cap. Weak candidacy never fires for sway — the together
+    // test sees the shoulders tilt against each other — so corroborated this way it is honest.
+    if (bounceCandidate && this.lateralActive) this.lastStrideAt = nowMs;
+    if (this.moving || this.lateralActive) this.lastMovingAt = nowMs;
+    // Corroboration judges the latest strides alone, never the whole speed history: a slow or
+    // uneven start must not delay the verdict once the rhythm is real. Every interval in the
+    // record spans a full stride — one measured from an unwitnessed rise never enters it — so a
+    // reading strictly inside the band is honest evidence of running pace. The fast path takes
+    // three such readings; when admission rests on the average instead, the extended window must
+    // agree — the span over more strides absorbs the timing noise a short one cannot.
+    const inBand = (interval: number) => interval >= STRIDE_MIN_INTERVAL_MS && interval <= STRIDE_MAX_INTERVAL_MS;
+    // A boundary reading alone is no evidence: a slower bob can read exactly the
+    // cutoff, so the fast path needs at least one reading strictly below it — something a
+    // slower bob can never produce — while the rest may sit anywhere inside the band.
+    const strictlyInBand = (interval: number) => interval > STRIDE_MIN_INTERVAL_MS && interval < STRIDE_MAX_INTERVAL_MS;
+    const meanOf = (list: readonly number[]) => list.reduce((sum, interval) => sum + interval, 0) / list.length;
+    const regular = (list: readonly number[]) => Math.max(...list) <= Math.min(...list) * STRIDE_REGULARITY;
+    const recentStrides = this.intervals.slice(-STRIDES_CORROBORATING);
+    const extendedStrides = this.intervals.slice(-STRIDES_EXTENDED);
+    const strideEvidence = recentStrides.length >= STRIDES_CORROBORATING
+      && regular(recentStrides)
+      && inBand(meanOf(recentStrides))
+      && ((recentStrides.every(inBand) && recentStrides.some(strictlyInBand))
+        || (extendedStrides.length >= STRIDES_EXTENDED && inBand(meanOf(extendedStrides)) && regular(extendedStrides)));
+    if ((!this.moving && !this.lateralActive && nowMs - this.lastMovingAt >= RUN_TRUST_HOLD_MS)
+      || nowMs - this.lastStrideAt >= LATERAL_BRIDGE_CAP_MS) this.trusted = false;
+    else if (!this.trusted && this.moving && nowMs - this.movingSince >= RUN_TRUST_MS
+      && (this.lateralActive || strideEvidence)) this.trusted = true;
+    // Running wins: its bounce also sways.
+    if (!this.moving) return this.walking
+      ? { cadenceSpm: this.walkSpm, speed01: speedFromCadence(this.walkSpm), step, running: this.trusted }
+      : { cadenceSpm: 0, speed01: 0, step, running: this.trusted };
+    const cadenceSpm = this.intervals.length ? 60_000 / median(this.intervals) : DEFAULT_SPM;
+    return { cadenceSpm, speed01: speedFromCadence(cadenceSpm), step, running: this.trusted };
   }
 
   reset(): void {
-    this.high = false;
-    this.lastSteps = [];
+    this.bounce.reset();
+    this.walk.reset();
+    this.walking = false;
+    this.walkSpm = MIN_WALK_SPM;
+    this.intervals = [];
     this.lastStepAt = Number.NEGATIVE_INFINITY;
-    this.lastStepSide = undefined;
-    this.previous = undefined;
-    this.pausedAt = undefined;
+    this.lastStepSide = 'right';
+    this.moving = false;
+    this.movingSince = Number.POSITIVE_INFINITY;
+    this.trusted = false;
+    this.lastMovingAt = Number.NEGATIVE_INFINITY;
+    this.lastStrideAt = Number.NEGATIVE_INFINITY;
+    this.lateralWindow = [];
+    this.lateralActive = false;
+    this.suspended = this.ranBeforeJump = this.lastStepWitnessed = false;
   }
 }

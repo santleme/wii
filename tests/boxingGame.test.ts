@@ -60,6 +60,16 @@ function punch(peakTimestampMs: number): SportActionEvent {
 }
 
 describe('BoxingGame', () => {
+  it('publishes and holds the final fight result for Iron Man', () => {
+    const { game, run, read, setMatch } = start({ holdResult: true });
+    expect(read().boxing.winner).toBeUndefined();
+    setMatch({ winner: 'draw' });
+    expect(read().boxing.winner).toBe('draw');
+    run(12);
+    expect(read().boxing.winner).toBe('draw');
+    game.dispose();
+  });
+
   it('hits a player who stays in the targeted zone', () => {
     const { run, read } = start();
     run(1.8);
@@ -69,7 +79,7 @@ describe('BoxingGame', () => {
   it('lets a body lean dodge the telegraphed punch', () => {
     const { game, run, read } = start();
     run(1); // the windup has aimed at the center
-    game.setLaneZone(1);
+    game.setDodgeZone(1);
     run(0.8);
     expect(read().label).toBe('100 × 100');
     expect(read().feedback?.text).toBe('ESQUIVOU!');
@@ -180,8 +190,27 @@ describe('BoxingGame', () => {
     it('lands an opponent punch whose impact preceded the bell', () => {
       const { run, read, setMatch } = start();
       setMatch({ round: 3, roundMsLeft: 1583 }); // impact ~1500 ms, resolution ~1650 ms
-      run(1.7);
+      run(2.1); // wait for both defense grace and the late-confirmation watermark
       expect(read()).toMatchObject({ label: '90 × 100', banner: { title: 'Adversário venceu' } });
+    });
+
+    it('waits for the complete defense window when impact precedes the bell', () => {
+      const { game, run, read, setMatch } = start();
+      setMatch({ round: 3, roundMsLeft: 1583 });
+      run(1.59);
+      expect(read().label).toBe('100 × 100');
+      game.setGuard(true);
+      run(0.5);
+      expect(read().label).toBe('99 × 100');
+      expect(read().feedback?.text).toBe('DEFENDEU');
+      run(0.2);
+      expect(read().label).toBe('99 × 100');
+    });
+
+    it('shows the attack type and target throughout its preparation', () => {
+      const { run, read } = start();
+      run(1);
+      expect(read().banner).toMatchObject({ title: 'RETO · CABEÇA' });
     });
 
     it('saves the player when the bell precedes the impact', () => {
@@ -197,7 +226,7 @@ describe('BoxingGame', () => {
 function dodgeFirst() {
   const fight = start();
   fight.run(1);
-  fight.game.setLaneZone(1);
+  fight.game.setDodgeZone(1);
   fight.run(0.7);
   return fight;
 }
@@ -303,19 +332,20 @@ describe('BoxingGame footwork', () => {
 
   it('misses from out of range, until the opponent walks in', () => {
     const fight = start();
-    fight.game.onKey('s');
-    fight.run(1); // 200 ms into the windup, backing away the whole time
+    const state = fight.game as unknown as { playerPos: Spot; opponentMotion: { position: Spot } };
+    state.playerPos = { x: 0, z: 2 };
+    state.opponentMotion.position = { x: 0, z: -2 };
+    fight.run(0.1);
     expect(gap(fight.game)).toBeGreaterThan(2.95);
     fight.game.onKey('e');
     expect(fight.read()).toMatchObject({ label: '100 × 100', feedback: { text: 'LONGE DEMAIS' } });
-    fight.game.onKeyUp('s');
     fight.run(2);
     expect(gap(fight.game)).toBeLessThanOrEqual(2.95);
   });
 
   it('lets the player step out of an opponent punch', () => {
     const fight = start();
-    hold(fight, 's', 0.8);
+    fight.run(0.8); // first windup has begun
     fight.game.onKey('s');
     fight.run(1);
     expect(fight.read()).toMatchObject({ label: '100 × 100', feedback: { text: 'LONGE DEMAIS' } });
@@ -323,13 +353,13 @@ describe('BoxingGame footwork', () => {
 
   it('circles only on a lean that is held, and stops when the camera loses its opinion', () => {
     const fight = start();
-    fight.game.setLaneZone(1);
+    fight.game.setDodgeZone(1);
     fight.run(0.3);
     expect(spots(fight.game).playerPos.x).toBe(0);
     fight.run(0.5);
     const { x } = spots(fight.game).playerPos;
     expect(x).toBeGreaterThan(0.1);
-    fight.game.setLaneZone(undefined);
+    fight.game.setDodgeZone(undefined);
     fight.run(0.5);
     expect(spots(fight.game).playerPos.x).toBe(x);
   });
@@ -578,4 +608,227 @@ describe('BoxingGame review fixes', () => {
     fight.run(0.2);
     expect((fight.game as unknown as { dash?: unknown }).dash).toBeUndefined();
   });
+});
+
+describe('BoxingGame tutorial mode', () => {
+  const tutorialPunch = (peakTimestampMs: number, kind: 'straight' | 'hook' | 'uppercut' = 'straight', target: 'head' | 'body' = 'head', hand: 'left' | 'right' = 'left'): SportActionEvent => ({
+    ...(punch(peakTimestampMs) as Extract<SportActionEvent, { type: 'punch' }>),
+    hand,
+    punchKind: kind,
+    punchTargetZone: target,
+    measurement: {
+      samples: [],
+      origin: { timestampMs: 0, lateral: 0, vertical: 0, forward: 0, elbowCosine: 0, confidence: 1 },
+      speedPeak: { timestampMs: 0, lateral: 0, vertical: 0, forward: 0.5, elbowCosine: 0.5, confidence: 1 },
+      contact: { timestampMs: 0, lateral: 0, vertical: 0, forward: 0.9, elbowCosine: 0.9, confidence: 1 },
+      end: { timestampMs: 0, lateral: 0, vertical: 0, forward: 0.8, elbowCosine: 0.8, confidence: 1 },
+      durationMs: 200,
+      forwardTravel: 0.9,
+      lateralExcursion: 0.05,
+      verticalRise: 0.02,
+      pathLength: 1,
+      netDisplacement: 0.9,
+      maxElbowCosine: 0.95,
+    },
+  });
+
+  it('never attacks the player and starts with the guard instruction', () => {
+    const { run, read } = start({ mode: 'tutorial' });
+    run(5);
+    const hud = read();
+    expect(hud.label).toBe('100 × 100');
+    expect(hud.status).toContain('guarda');
+  });
+
+  it('advances through the steps as the player performs them', () => {
+    const { game, run, read } = start({ mode: 'tutorial' });
+    game.setGuard(true);
+    run(1.2);
+    expect(read().status).toContain('jab');
+    game.setGuard(false);
+    const at = () => performance.now();
+    for (let i = 0; i < 3; i += 1) {
+      game.onAction(tutorialPunch(at(), 'straight', 'head', 'left'));
+      run(0.3);
+    }
+    expect(read().status).toContain('cruzado');
+    for (let i = 0; i < 3; i += 1) {
+      game.onAction(tutorialPunch(at(), 'straight', 'head', 'right'));
+      run(0.3);
+    }
+    expect(read().status).toContain('ganchos');
+  });
+
+  it('reports the learning floor on entry and the adapted travel once done', () => {
+    const travels: number[] = [];
+    const { game, run } = start({ mode: 'tutorial', onPunchTravel: (travel) => travels.push(travel) });
+    expect(travels).toEqual([0.15]);
+    game.setGuard(true);
+    run(1.2);
+    game.setGuard(false);
+    const at = () => performance.now();
+    for (let i = 0; i < 3; i += 1) { game.onAction(tutorialPunch(at(), 'straight', 'head', 'left')); run(0.2); }
+    for (let i = 0; i < 3; i += 1) { game.onAction(tutorialPunch(at(), 'straight', 'head', 'right')); run(0.2); }
+    for (let i = 0; i < 2; i += 1) { game.onAction(tutorialPunch(at(), 'hook', 'head')); run(0.2); }
+    for (let i = 0; i < 2; i += 1) { game.onAction(tutorialPunch(at(), 'uppercut', 'head')); run(0.2); }
+    for (let i = 0; i < 2; i += 1) { game.onAction(tutorialPunch(at(), 'straight', 'body')); run(0.2); }
+    game.setDodgeZone(-1); run(0.3); game.setDodgeZone(0); run(0.3);
+    game.setDodgeZone(1); run(0.3); game.setDodgeZone(0); run(0.3);
+    game.setDuck(true); run(0.6); game.setDuck(false); run(0.3);
+    game.setDuck(true); run(0.6); game.setDuck(false); run(0.3);
+    expect(travels.at(-1)).toBeCloseTo(0.25);
+  });
+
+  it('unknown-type punches do not advance the tutorial', () => {
+    const { game, run, read } = start({ mode: 'tutorial' });
+    game.setGuard(true);
+    run(1.2);
+    game.setGuard(false);
+    game.onAction(punch(performance.now()));
+    run(0.3);
+    expect(read().status).toContain('jab');
+  });
+
+  it('finishes with a completion banner once every step is done', () => {
+    const { game, run, read } = start({ mode: 'tutorial' });
+    game.setGuard(true);
+    run(1.2);
+    game.setGuard(false);
+    const at = () => performance.now();
+    for (let i = 0; i < 3; i += 1) { game.onAction(tutorialPunch(at(), 'straight', 'head', 'left')); run(0.2); }
+    for (let i = 0; i < 3; i += 1) { game.onAction(tutorialPunch(at(), 'straight', 'head', 'right')); run(0.2); }
+    for (let i = 0; i < 2; i += 1) { game.onAction(tutorialPunch(at(), 'hook', 'head')); run(0.2); }
+    for (let i = 0; i < 2; i += 1) { game.onAction(tutorialPunch(at(), 'uppercut', 'head')); run(0.2); }
+    for (let i = 0; i < 2; i += 1) { game.onAction(tutorialPunch(at(), 'straight', 'body')); run(0.2); }
+    game.setDodgeZone(-1); run(0.3); game.setDodgeZone(0); run(0.3);
+    game.setDodgeZone(1); run(0.3); game.setDodgeZone(0); run(0.3);
+    game.setDuck(true); run(0.6); game.setDuck(false); run(0.3);
+    game.setDuck(true); run(0.6); game.setDuck(false); run(0.3);
+    const hud = read();
+    expect(hud.status).toBe('Tutorial completo!');
+    expect(hud.banner?.title).toBe('Tutorial completo!');
+  });
+});
+
+describe('opponent evasion and perception', () => {
+  it('makes the same confirmed punch miss only when the opponent moved off its aimed line', () => {
+    const result = (lateral: number) => {
+      const fight = start();
+      fight.run(1);
+      const state = fight.game as unknown as { fightMs: number; zoneHistory: unknown[] };
+      const entry = (atMs: number, x: number) => ({
+        atMs, zone: 0, guarded: false, ducked: false, inRange: true,
+        playerPos: { x: 0, z: 2 }, opponentPos: { x, z: -0.5 }, playerPunching: false,
+        guardKnown: true, zoneKnown: true, duckKnown: true,
+      });
+      state.zoneHistory = [entry(state.fightMs - 100, 0), entry(state.fightMs, lateral)];
+      fight.game.onAction(punch(wallMs));
+      return fight.read();
+    };
+    expect(result(0)).toMatchObject({ label: '100 × 88' });
+    expect(result(0.3)).toMatchObject({ label: '100 × 100', feedback: { text: 'ADVERSÁRIO ESQUIVOU' } });
+  });
+
+  it('does not react to a punch until the observation delay has elapsed', () => {
+    let rolls = 0;
+    const fight = start({ opponent: 'technical', motionRng: () => { rolls += 1; return 0.999; } });
+    fight.run(0.3);
+    fight.game.onAction({ id: 1, timestampMs: wallMs, confidence: 1, trackingState: 'tracked', source: 'cv', type: 'punch-start', hand: 'left' });
+    fight.run(0.15);
+    expect(rolls).toBe(0);
+    fight.run(0.12);
+    expect(rolls).toBe(1);
+  });
+});
+
+it('does not accept a pose sample from before tracking was lost after reacquisition', () => {
+  const fight = start();
+  const capturedAt = wallMs;
+  fight.game.setDodgeZone(1, capturedAt);
+  fight.game.setTracking('PROCURANDO');
+  wallMs += 100;
+  fight.game.setTracking('SEM POSE');
+  wallMs += 100;
+  fight.game.setTracking('TRACKING');
+  fight.game.setDodgeZone(-1, capturedAt);
+  const state = fight.game as unknown as { cameraZoneValid: boolean; cameraZone: number };
+  expect(state.cameraZoneValid).toBe(false);
+  fight.game.setDodgeZone(-1, wallMs);
+  expect(state.cameraZoneValid).toBe(true);
+  expect(state.cameraZone).toBe(-1);
+});
+
+
+it.each([[30, 'player'], [70, 'opponent']] as const)(
+  'orders pre-bell knockouts by their impact timestamps when confirmation is late (%i ms)',
+  (playerPeakMs, winner) => {
+    const fight = start();
+    const internal = fight.game as unknown as { fightMs: number; ai: { phase: unknown; phaseStartedMs: number } };
+    const begin = internal.fightMs;
+    const beginWall = wallMs;
+    internal.ai = {
+      ...internal.ai,
+      phaseStartedMs: begin,
+      phase: { kind: 'windup', hand: 'right', targetZone: 0, impactAtMs: begin + 50, attackKind: 'straight', target: 'head' },
+    };
+    fight.setMatch({ round: 3, roundMsLeft: 100, playerHp: 10, opponentHp: 10 });
+    fight.run(0.3); // past the 150 ms defense grace but inside the confirmation watermark
+    fight.game.onAction(punch(beginWall + playerPeakMs));
+    fight.run(0.3);
+    expect(fight.read().banner?.title).toBe(winner === 'player' ? 'VOCÊ VENCEU!' : 'Adversário venceu');
+  },
+);
+
+it('rejects an old punch onset delivered after a tracking pause', () => {
+  const fight = start();
+  fight.run(0.1);
+  const oldAt = wallMs;
+  fight.game.setTracking('SEM POSE');
+  fight.run(1.1);
+  fight.game.setTracking('TRACKING');
+  const state = fight.game as unknown as { punchAnimS: { left: number } };
+  const before = state.punchAnimS.left;
+  fight.game.onAction({ id: 99, timestampMs: oldAt, confidence: 1, trackingState: 'tracked', source: 'cv', type: 'punch-start', hand: 'left' });
+  expect(state.punchAnimS.left).toBe(before);
+});
+
+it('does not restore depth movement from a pose captured before loss', () => {
+  const fight = start();
+  const old = wallMs;
+  fight.game.setDepthMove(1, old);
+  fight.game.setDepthSpeed(1, old);
+  wallMs += 10;
+  fight.game.setTracking('SEM POSE');
+  wallMs += 10;
+  fight.game.setTracking('TRACKING');
+  fight.game.setDepthMove(1, old);
+  fight.game.setDepthSpeed(1, old);
+  const internal = fight.game as unknown as { cameraDepth: number; cameraDepthSpeed?: number };
+  expect(internal.cameraDepth).toBe(0);
+  expect(internal.cameraDepthSpeed).toBeUndefined();
+});
+
+it('does not restart the animation from a duplicate punch onset', () => {
+  const fight = start();
+  fight.run(0.1);
+  const event = { id: 42, timestampMs: wallMs, confidence: 1, trackingState: 'tracked' as const, source: 'cv' as const, type: 'punch-start' as const, hand: 'left' as const };
+  fight.game.onAction(event);
+  fight.run(0.1);
+  const internal = fight.game as unknown as { punchAnimS: { left: number } };
+  const progress = internal.punchAnimS.left;
+  fight.game.onAction(event);
+  expect(internal.punchAnimS.left).toBe(progress);
+});
+
+it('resolves a mid-round knockout after an earlier opponent impact in physical order', () => {
+  const fight = start();
+  const internal = fight.game as unknown as { fightMs: number; ai: { phase: unknown; phaseStartedMs: number } };
+  const begin = internal.fightMs;
+  const beginWall = wallMs;
+  internal.ai = { ...internal.ai, phaseStartedMs: begin, phase: { kind: 'windup', hand: 'right', targetZone: 0, impactAtMs: begin + 50, attackKind: 'straight', target: 'head' } };
+  fight.setMatch({ playerHp: 10, opponentHp: 10 });
+  fight.run(0.1);
+  fight.game.onAction(punch(beginWall + 70));
+  fight.run(0.5);
+  expect(fight.read().banner?.title).toBe('Adversário venceu');
 });

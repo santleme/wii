@@ -162,3 +162,9 @@ describe('opponent AI', () => {
     });
   });
 });
+
+it('requires the opponent to be within lateral racket reach', async () => {
+  const { opponentCanReach } = await import('../src/games/tennis/opponentAi');
+  expect(opponentCanReach(0, 1.15, 1.15)).toBe(true);
+  expect(opponentCanReach(0, 1.16, 1.15)).toBe(false);
+});

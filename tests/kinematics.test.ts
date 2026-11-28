@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { OneEuroFilter } from '@wii/spatial-core';
 import { ActionPipeline } from '../src/kinematics/actionPipeline';
 import { landmarkConfidence } from '../src/kinematics/math';
-import { hasMeaningfulLateralComponent, SwingDetector } from '../src/kinematics/swingDetector';
-import { calibration, pose, poseWithHipBounce, poseWithWorldShoulderWidth, rotateWorldYaw } from './fixtures/syntheticPose';
+import { calibration, pose, poseWithHipBounce } from './fixtures/syntheticPose';
 import { cadenceHarness } from './fixtures/torsoHarness';
 
 /** Feeds the pipeline with torso bounce at 150 spm between `from` and `until` — the run-in-place signal. */
@@ -11,7 +10,8 @@ function driveBounce(pipeline: ActionPipeline, profile: ReturnType<typeof calibr
   const hz = 150 / 60;
   for (let time = startAt; time <= until; time += 33) {
     const units = time >= from ? 0.04 * Math.sin((2 * Math.PI * hz * (time - from)) / 1000) : 0;
-    pipeline.update(poseWithHipBounce(time, units * 0.4), profile);
+    const sway = time >= from ? 0.04 * Math.cos((2 * Math.PI * hz * (time - from)) / 1000) : 0;
+    pipeline.update(poseWithHipBounce(time, units * 0.4, undefined, sway), profile);
   }
 }
 
@@ -90,126 +90,6 @@ describe('cadence tracker', () => {
   });
 });
 
-describe('swing detector', () => {
-  it('uses a bounded lateral component for stroke candidates', () => {
-    expect(hasMeaningfulLateralComponent(10, 2.4)).toBe(false);
-    expect(hasMeaningfulLateralComponent(10, 2.5)).toBe(true);
-    expect(hasMeaningfulLateralComponent(10, 2.6)).toBe(true);
-  });
-
-  it('emits one swing and ignores the fast return until the ready pose is held', () => {
-    const detector = new SwingDetector('right');
-    const profile = calibration();
-    expect(detector.update(pose(0), profile)).toBeUndefined();
-    expect(detector.update(pose(100, { wristLateral: -0.3 }), profile)).toMatchObject({ kind: 'onset' });
-    expect(detector.update(pose(150, { wristLateral: 0.2 }), profile)).toMatchObject({ side: 'forehand' });
-    expect(detector.update(pose(200, { wristLateral: 0 }), profile)).toBeUndefined();
-    expect(detector.update(pose(400, { wristLateral: 0 }), profile)).toBeUndefined();
-  });
-
-  it.each(['wristVertical', 'wristDepth'] as const)('does not confirm a swing from %s motion', (axis) => {
-    const detector = new SwingDetector('right');
-    const profile = calibration();
-    const signals = [detector.update(pose(0), profile)];
-    for (let time = 100; time <= 500; time += 40) {
-      signals.push(detector.update(pose(time, { [axis]: 0.3, wristLateral: 0.02 }), profile));
-    }
-    expect(signals.filter(Boolean)).toHaveLength(0);
-  });
-
-  it('keeps a lateral peak when the wrist finishes upward', () => {
-    const detector = new SwingDetector('right');
-    const profile = calibration();
-    const frames = [pose(0), pose(33), pose(66, { wristLateral: -0.11 })];
-    for (let time = 99; time <= 495; time += 33) frames.push(pose(time, { wristLateral: -0.12, wristVertical: 0.3 }));
-    const signals = frames.map((frame) => detector.update(frame, profile)).filter((output) => output?.kind === 'confirmed');
-    expect(signals).toMatchObject([{ side: 'forehand' }]);
-  });
-
-  it('requires a new neutral dwell after each swing', () => {
-    const detector = new SwingDetector('right');
-    const profile = calibration();
-    detector.reset();
-    for (let time = 0; time <= 240; time += 40) detector.update(pose(time), profile);
-    detector.update(pose(270, { wristLateral: -0.2 }), profile);
-    expect(detector.update(pose(310, { wristLateral: 0.2 }), profile)).toBeDefined();
-    detector.update(pose(1500), profile); // a single neutral frame
-    detector.update(pose(1540, { wristLateral: -0.2 }), profile);
-    expect(detector.update(pose(1580, { wristLateral: 0.2 }), profile)).toBeUndefined();
-  });
-
-  it('drops a pending swing after a tracking gap', () => {
-    const detector = new SwingDetector('right');
-    const profile = calibration();
-    detector.update(pose(0), profile);
-    detector.update(pose(99, { wristLateral: -0.3 }), profile);
-    expect(detector.update(pose(3099, { wristLateral: -0.3 }), profile)).toBeUndefined();
-  });
-
-  it('classifies the peak stroke direction, robust to body yaw', () => {
-    const classify = (hand: 'left' | 'right', displacement: number, rotate = false) => {
-      const detector = new SwingDetector(hand);
-      const profile = calibration();
-      let signal: ReturnType<SwingDetector['update']>;
-      for (const time of [0, 20, 40, 60, 80, 110]) {
-        const progress = time <= 80 ? time / 80 : 1 - (time - 80) / 30;
-        const snapshot = pose(time, { [hand === 'right' ? 'wristLateral' : 'leftWristLateral']: displacement * progress });
-        const current = detector.update(rotate ? rotateWorldYaw(snapshot, 0.9) : snapshot, profile);
-        if (current?.kind === 'confirmed') signal = current;
-      }
-      return signal;
-    };
-    expect(classify('right', 0.2)).toMatchObject({ side: 'backhand' });
-    expect(classify('right', -0.2)).toMatchObject({ side: 'forehand' });
-    expect(classify('left', 0.2)).toMatchObject({ side: 'forehand' });
-    expect(classify('right', -0.2, true)).toMatchObject({ side: 'forehand' });
-    expect(classify('left', 0.2, true)).toMatchObject({ side: 'forehand' });
-  });
-
-  it('does not infer a swing from frame-to-frame shoulder-width variation', () => {
-    const detector = new SwingDetector('right');
-    const profile = calibration();
-    const frames = [0.4, 0.6, 0.4, 0.6, 0.4].map((width, index) => poseWithWorldShoulderWidth(index * 33, width));
-    const signals = frames.map((frame) => detector.update(frame, profile)).filter(Boolean);
-    expect(signals).toHaveLength(0);
-  });
-
-  it('waits for a neutral ready pose before rearming after a confirmed tracking loss', () => {
-    const detector = new SwingDetector('right');
-    const profile = calibration();
-    detector.reset();
-    for (let time = 0; time <= 240; time += 40) expect(detector.update(pose(time), profile)).toBeUndefined();
-    expect(detector.update(pose(270, { wristLateral: -0.2 }), profile)).toMatchObject({ kind: 'onset' });
-    expect(detector.update(pose(310, { wristLateral: 0.2 }), profile)).toMatchObject({ side: 'forehand' });
-  });
-
-  it('re-arms without a wrist reference after low speed is sustained', () => {
-    const detector = new SwingDetector('right');
-    const base = calibration();
-    const profile = { ...base, world: { ...base.world, readyWristLocal: undefined } };
-    detector.update(pose(0), profile);
-    detector.update(pose(100, { wristLateral: -0.3 }), profile);
-    expect(detector.update(pose(150, { wristLateral: 0.2 }), profile)).toMatchObject({ kind: 'confirmed' });
-    for (let time = 200; time <= 700; time += 50) detector.update(pose(time), profile);
-
-    expect(detector.update(pose(750, { wristLateral: -0.3 }), profile)).toMatchObject({ kind: 'onset' });
-    expect(detector.update(pose(800, { wristLateral: 0.2 }), profile)).toMatchObject({ kind: 'confirmed' });
-  });
-
-  it('does not count a tracking gap as velocity-only re-arm dwell', () => {
-    const detector = new SwingDetector('right');
-    const base = calibration();
-    const profile = { ...base, world: { ...base.world, readyWristLocal: undefined } };
-    detector.update(pose(0), profile);
-    detector.update(pose(100, { wristLateral: -0.3 }), profile);
-    detector.update(pose(150, { wristLateral: 0.2 }), profile);
-    for (let time = 200; time <= 600; time += 50) detector.update(pose(time), profile);
-    detector.update(pose(900), profile); // resumes after a 300 ms hole: not observed rest
-
-    expect(detector.update(pose(950, { wristLateral: -0.3 }), profile)).toBeUndefined();
-  });
-});
-
 describe('action pipeline tracking gate', () => {
   it('keeps all discrete action signals quiet for a stationary jitter fixture', () => {
     const pipeline = new ActionPipeline();
@@ -251,7 +131,9 @@ describe('action pipeline tracking gate', () => {
     const before = pipeline.update(bounceAt(1533), profile);
     expect(before.controls.trackingState).toBe('tracked');
     const degraded = pipeline.update(pose(1566, { confidence: 0.1 }), profile);
-    expect(degraded.controls).toMatchObject({ sprintSpeed01: 0, cadenceSpm: 0, trackingState: 'degraded' });
+    // The run was under way, so one bad frame coasts it instead of stopping it.
+    expect(degraded.controls.trackingState).toBe('degraded');
+    expect(degraded.controls.sprintSpeed01).toBeGreaterThan(0.4);
     expect(degraded.events.filter((event) => event.type === 'step')).toHaveLength(0);
     // The gate needs three consecutive good frames to leave 'degraded' — and no spurious
     // step fires out of the dip itself.
@@ -268,7 +150,7 @@ describe('action pipeline tracking gate', () => {
     // A sustained blackout — past the gate's 800 ms window — ends in 'lost' with the
     // sprint fully stopped (the coast has long decayed by then).
     const blackout = [];
-    for (let time = 1112; time <= 2000; time += 33) blackout.push(pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile));
+    for (let time = 1112; time <= 2000; time += 33) blackout.push(pipeline.update(pose(time, { hiddenLandmarks: [11, 12] }), profile));
     const lost = blackout.at(-1)!;
     expect(lost.controls).toMatchObject({ sprintSpeed01: 0, cadenceSpm: 0, trackingState: 'lost' });
   });
@@ -282,14 +164,16 @@ describe('action pipeline tracking gate', () => {
     driveBounce(pipeline, profile, 66, 1046);
     pipeline.update(poseWithHipBounce(1079, 0), profile);
     const after = [1112, 1145, 1178, 1211, 1244, 2000].flatMap((time) => {
-      if (cause === 'reset') return pipeline.reset();
-      return pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile).events;
+      if (cause === 'reset') return pipeline.reset(time);
+      return pipeline.update(pose(time, { hiddenLandmarks: [11, 12] }), profile).events;
     });
     const stops = after.filter((event) => event.type === 'sprint' && event.speed01 === 0);
     expect(stops).toHaveLength(1);
     // The stop rides whatever tracking state the frame carries when the coast runs out —
     // degraded early in the blackout, lost once the blackout is sustained.
-    if (cause === 'reset') expect(stops[0]).toMatchObject({ speed01: 0, cadenceSpm: 0, trackingState: state });
+    if (cause === 'reset') {
+      expect(stops[0]).toMatchObject({ timestampMs: 1112, speed01: 0, cadenceSpm: 0, trackingState: state });
+    }
     else expect(stops[0]?.trackingState).not.toBe('tracked');
   });
 
@@ -302,7 +186,7 @@ describe('action pipeline tracking gate', () => {
     expect(speedBefore).toBeGreaterThan(0.3);
     // A ~200 ms blur burst: the speed must decay smoothly, never hitting zero — and no
     // stop event may fire.
-    const burst = [1112, 1145, 1178, 1211, 1244, 1277].map((time) => pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile));
+    const burst = [1112, 1145, 1178, 1211, 1244, 1277].map((time) => pipeline.update(pose(time, { hiddenLandmarks: [11, 12] }), profile));
     const speeds = burst.map((result) => result.controls.sprintSpeed01);
     expect(speeds.every((speed) => speed > 0)).toBe(true);
     expect(speeds[0]!).toBeLessThan(speedBefore);
@@ -322,7 +206,7 @@ describe('action pipeline tracking gate', () => {
     driveBounce(pipeline, profile, 66, 1046);
     pipeline.update(bounceAt(1079), profile);
     // The player keeps running through a ~300 ms blackout the camera cannot see.
-    for (let time = 1112; time <= 1400; time += 33) pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile);
+    for (let time = 1112; time <= 1400; time += 33) pipeline.update(pose(time, { hiddenLandmarks: [11, 12] }), profile);
     // Detectors were never reset: the cadence memory is warm, so measured cadence flows
     // within the first tracked frames — a from-scratch restart would emit nothing for
     // ~2 step intervals (~800 ms at 150 spm). The median-of-three then purges the
@@ -343,7 +227,7 @@ describe('action pipeline tracking gate', () => {
     // Beyond the 600 ms coast timeout the runner must be fully stopped — and the zero
     // emitted exactly once even though bad frames keep coming.
     const blackout = [];
-    for (let time = 1112; time <= 1750; time += 33) blackout.push(pipeline.update(pose(time, { hiddenLandmarks: [23, 24] }), profile));
+    for (let time = 1112; time <= 1750; time += 33) blackout.push(pipeline.update(pose(time, { hiddenLandmarks: [11, 12] }), profile));
     const stops = blackout.flatMap((result) => result.events).filter((event) => event.type === 'sprint' && event.speed01 === 0);
     expect(stops).toHaveLength(1);
     expect(blackout.at(-1)!.controls.sprintSpeed01).toBe(0);
@@ -403,12 +287,11 @@ describe('action pipeline tracking gate', () => {
     [0, 33, 66].forEach((time) => { pipeline.update(pose(time), profile); });
     pipeline.update(withWorldConfidence(pose(99, { wristLateral: -0.3 }), 11, 0.6, 0.6), profile);
     pipeline.update(withWorldConfidence(pose(132, { wristLateral: -0.3 }), 16, 0.1, 0.1), profile);
-    pipeline.update(pose(165, { wristLateral: 0.2 }), profile);
-    pipeline.update(pose(198, { wristLateral: 0.2 }), profile);
-    const recovery = pipeline.update(pose(231, { wristLateral: 0.2 }), profile);
-    const swing = recovery.events.find((event) => event.type === 'swing');
+    const events = [pose(165, { wristLateral: 0.2 }), pose(198, { wristLateral: 0.2 }), pose(231, { wristLateral: 0.2 })]
+      .flatMap((frame) => pipeline.update(frame, profile).events);
+    const swing = events.find((event) => event.type === 'swing');
     expect(swing).toMatchObject({ type: 'swing', confidence: 0.6 });
-    expect(swing?.timestampMs).toBe(231);
+    expect(swing?.timestampMs).toBe(165);
     expect(swing?.type === 'swing' ? swing.peakTimestampMs : undefined).toBe(99);
   });
 
@@ -432,11 +315,10 @@ describe('action pipeline tracking gate', () => {
     [0, 33, 66].forEach((time) => { pipeline.update(pose(time), profile); });
     pipeline.update(pose(99, { wristLateral: -0.3 }), profile);
     pipeline.update(withWorldConfidence(pose(132, { wristLateral: -0.3 }), 16, 0.1, 0.1), profile);
-    pipeline.update(pose(165, { wristLateral: 0.2 }), profile);
-    pipeline.update(pose(198, { wristLateral: 0.2 }), profile);
-    const recovery = pipeline.update(withWorldConfidence(pose(231, { wristLateral: 0.2 }), 11, 0.6, 0.6), profile);
-    const swing = recovery.events.find((event) => event.type === 'swing');
-    expect(swing).toMatchObject({ type: 'swing', confidence: 0.95, timestampMs: 231, peakTimestampMs: 99 });
+    const events = [pose(165, { wristLateral: 0.2 }), pose(198, { wristLateral: 0.2 }), withWorldConfidence(pose(231, { wristLateral: 0.2 }), 11, 0.6, 0.6)]
+      .flatMap((frame) => pipeline.update(frame, profile).events);
+    const swing = events.find((event) => event.type === 'swing');
+    expect(swing).toMatchObject({ type: 'swing', confidence: 0.95, timestampMs: 165, peakTimestampMs: 99 });
   });
 
   it('uses landmark presence as well as visibility to gate a swing', () => {
@@ -449,7 +331,7 @@ describe('action pipeline tracking gate', () => {
     expect(result.events.filter((event) => event.type === 'swing')).toHaveLength(0);
   });
 
-  it('allows a swing when only its feature landmarks are tracked, and labels that local gate', () => {
+  it('keeps swings and tracking alive when only the hips are missing (shoulder-anchored gate)', () => {
     const pipeline = new ActionPipeline();
     const profile = calibration();
     const missingHips = (time: number, wristLateral = 0) => {
@@ -461,7 +343,7 @@ describe('action pipeline tracking gate', () => {
     pipeline.update(missingHips(99, -0.3), profile);
     const recovery = pipeline.update(missingHips(132, 0.2), profile);
     const swing = recovery.events.find((event) => event.type === 'swing');
-    expect(recovery.snapshot.trackingState).toBe('lost');
+    expect(recovery.snapshot.trackingState).toBe('tracked');
     expect(swing).toMatchObject({ type: 'swing', trackingState: 'tracked' });
   });
 });
@@ -512,15 +394,15 @@ describe('mão da raquete', () => {
     const pipeline = new ActionPipeline();
     const profile = calibration();
     [0, 33, 66].forEach((time) => { pipeline.update(pose(time), profile); });
-    pipeline.update(pose(99, { wristLateral: -0.15, leftWristLateral: 0.15 }), profile);
-    const held = pipeline.update(pose(132, { wristLateral: 0.05, leftWristLateral: 0.35 }), profile);
+    pipeline.update(pose(99, { wristLateral: -0.3, leftWristLateral: 0.3 }), profile);
+    const held = pipeline.update(pose(132, { wristLateral: 0.1, leftWristLateral: 0.5 }), profile);
     expect(held.events.filter((event) => event.type === 'swing')).toHaveLength(0);
     // Left wrist vanishes for good: once its gate crosses the sustained-blackout window
     // into lost the pending arc dies and the held swing emits.
     const frames = [];
     for (let time = 165; time <= 1100; time += 33) frames.push(time);
     const swings = frames
-      .flatMap((time) => pipeline.update(withWorldConfidence(pose(time, { wristLateral: 0.05 }), 15, 0, 0), profile).events)
+      .flatMap((time) => pipeline.update(withWorldConfidence(pose(time, { wristLateral: 0.1 }), 15, 0, 0), profile).events)
       .filter((event) => event.type === 'swing');
     expect(swings).toHaveLength(1);
   });
@@ -529,14 +411,14 @@ describe('mão da raquete', () => {
     const pipeline = new ActionPipeline();
     const profile = calibration();
     [0, 33, 66].forEach((time) => { pipeline.update(pose(time), profile); });
-    pipeline.update(pose(99, { wristLateral: -0.15, leftWristLateral: 0.15 }), profile);
-    const held = pipeline.update(pose(132, { wristLateral: 0.05, leftWristLateral: 0.35 }), profile);
+    pipeline.update(pose(99, { wristLateral: -0.3, leftWristLateral: 0.3 }), profile);
+    const held = pipeline.update(pose(132, { wristLateral: 0.1, leftWristLateral: 0.5 }), profile);
     expect(held.events.filter((event) => event.type === 'swing')).toHaveLength(0);
     // 3 bad + 1 good keeps the rival gate forever degraded: its pending arc is never updated,
     // never confirmed and never reset — only the hold bound frees the waiting swing.
     const flapping = (time: number) => (Math.floor((time - 165) / 33) % 4 === 3
-      ? pose(time, { wristLateral: 0.05 })
-      : withWorldConfidence(pose(time, { wristLateral: 0.05 }), 15, 0, 0));
+      ? pose(time, { wristLateral: 0.1 })
+      : withWorldConfidence(pose(time, { wristLateral: 0.1 }), 15, 0, 0));
     const frames = Array.from({ length: 15 }, (_, i) => 165 + i * 33);
     const swings = frames.flatMap((time) => pipeline.update(flapping(time), profile).events).filter((event) => event.type === 'swing');
     expect(swings).toHaveLength(1);
@@ -549,17 +431,12 @@ describe('mão da raquete', () => {
     pipeline.update(pose(99, { wristLateral: -0.3 }), profile);
     const first = pipeline.update(pose(132, { wristLateral: 0.2 }), profile);
     expect(first.events.filter((event) => event.type === 'swing')).toHaveLength(1);
-    // Back near the ready pose (|wristLateral| < 0.14 keeps the wrist within reach) the
-    // right detector re-readies before its second arc.
-    for (let time = 165; time <= 495; time += 33) pipeline.update(pose(time, { wristLateral: -0.05 }), profile);
-    pipeline.update(pose(495, { wristLateral: -0.05, leftWristLateral: 0.5 }), profile);
-    // Block runs to 532 ms: the dominant left arc confirms inside it and is discarded;
-    // only the right's post-block confirmation may reach the game.
-    const blocked = pipeline.update(pose(528, { wristLateral: 0.35, leftWristLateral: 0.15 }), profile);
-    const released = pipeline.update(pose(561, { wristLateral: -0.05, leftWristLateral: 0.15 }), profile);
-    const swings = [blocked, released].flatMap((result) => result.events).filter((event) => event.type === 'swing');
-    expect(swings).toHaveLength(1);
-    expect(swings[0]).toMatchObject({ type: 'swing', side: 'backhand', timestampMs: 561, peakTimestampMs: 528 });
+    // The other arm swings and confirms inside the 400 ms block: dropped for good.
+    const later = [165, 198, 231, 264, 297, 330, 600, 633].flatMap((time) => pipeline.update(
+      pose(time, { wristLateral: 0.2, leftWristLateral: time >= 198 ? 0.5 : 0 }),
+      profile,
+    ).events);
+    expect(later.filter((event) => event.type === 'swing')).toHaveLength(0);
   });
 
   it('descarta o golpe segurado quando o próprio pulso perde o rastreamento', () => {
@@ -629,51 +506,30 @@ describe('action pipeline (upper-body only)', () => {
     // No jump is emitted during the pure-bounce portion before 3000.
     expect(events.filter((event) => event.type === 'jump' && event.timestampMs < 3000)).toHaveLength(0);
   });
+});
 
-  it('restarts swing re-arm continuity across an explicitly degraded wrist frame', () => {
-    const pipeline = new ActionPipeline();
-    const profile = { ...calibration(), world: { ...calibration().world, readyWristLocal: undefined } };
-    const events: import('../src/cv/protocol').SportActionEvent[] = [];
-    const feed = (time: number, lateral = 0, degraded = false) => {
-      const base = pose(time, { wristLateral: lateral });
-      const frame = degraded ? withWorldConfidence(base, 16, 0, 0) : base;
-      events.push(...pipeline.update(frame, profile).events);
-    };
+it('keeps the effort timestamp through low confidence and collapsed shoulders until a new velocity is measured', () => {
+  const pipeline = new ActionPipeline();
+  // The effort channel only measures while the bounce verdict trusts the run, so every frame
+  // here keeps the torso oscillating at running cadence after an initial warm-up.
+  const bouncing = (time: number, options?: Parameters<typeof pose>[1]) => {
+    const base = pose(time, options);
+    const dy = 0.016 * Math.sin((2 * Math.PI * 2.5 * time) / 1000);
+    const dx = 0.04 * Math.cos((2 * Math.PI * 2.5 * time) / 1000);
+    return { ...base, landmarks: base.landmarks.map((point, index) => [0, 11, 12, 23, 24].includes(index) ? { ...point, y: point.y + dy, x: point.x + dx } : point) };
+  };
+  for (let time = 0; time <= 1200; time += 33) pipeline.update(bouncing(time));
+  for (const time of [1233, 1266, 1299, 1332]) pipeline.update(bouncing(time));
+  const dim = pipeline.update(bouncing(1365, { confidence: 0.4 }));
+  expect(dim.snapshot.trackingState).toBe('tracked');
+  expect(dim.effortSampleAtMs).toBe(1332);
 
-    [0, 33, 66].forEach((time) => { feed(time); });
-    feed(99, -0.3);
-    feed(132, 0.2);
-    for (let time = 165; time <= 599; time += 33) feed(time);
-    feed(998, 0, true);
-    for (let time = 1031; time <= 1331; time += 33) feed(time);
-    feed(1364, -0.3);
-    expect(events.filter((event) => event.type === 'swing-start' && event.timestampMs === 1364)).toHaveLength(0);
+  const collapsed = bouncing(1398);
+  const landmarks = [...collapsed.landmarks];
+  landmarks[12] = { ...landmarks[11]! };
+  expect(pipeline.update({ ...collapsed, landmarks }).effortSampleAtMs).toBe(1332);
 
-    for (let time = 1397; time <= 2200; time += 33) feed(time);
-    feed(2233, -0.3);
-    expect(events.some((event) => event.type === 'swing-start' && event.timestampMs === 2233)).toBe(true);
-  });
-
-  it('keeps swings available without readyWristLocal; lanes, cadence and jump still work', () => {
-    const pipeline = new ActionPipeline();
-    const noWristProfile = {
-      ...calibration(),
-      world: { ...calibration().world, readyWristLocal: undefined },
-    };
-    const events = [];
-    const hz = 150 / 60;
-    for (let time = 0; time <= 2500; time += 33) {
-      const units = time >= 200 && time <= 1500 ? 0.04 * Math.sin((2 * Math.PI * hz * (time - 200)) / 1000) : 0;
-      // Big wrist arcs on top — swings remain available because their references are only
-      // a re-arm fast path, not an onset prerequisite.
-      const snapshot = torsoOnly(time, units * 0.4);
-      const withWrist = {
-        ...snapshot,
-        worldLandmarks: snapshot.worldLandmarks.map((point, index) => (index === 16 ? { ...point, x: -0.2 - (time % 2 === 0 ? -0.3 : 0.3), visibility: 0.95, presence: 0.95 } : point)),
-      };
-      events.push(...pipeline.update(withWrist, noWristProfile).events);
-    }
-    expect(events.filter((event) => event.type === 'swing').length).toBeGreaterThan(0);
-    expect(events.filter((event) => event.type === 'step').length).toBeGreaterThan(2);
-  });
+  const recovered = pipeline.update(bouncing(1431, { wristVertical: 0.3 }));
+  expect(recovered.effortSampleAtMs).toBe(1332);
+  expect(pipeline.update(bouncing(1464, { wristVertical: 0.3 })).effortSampleAtMs).toBe(1464);
 });

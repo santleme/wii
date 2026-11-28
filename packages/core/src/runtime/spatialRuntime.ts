@@ -4,6 +4,7 @@ import type { HandSnapshot } from '../providers/handProtocol';
 import { PoseClient } from '../providers/poseClient';
 import type { PoseClientAssets } from '../providers/poseClient';
 import type { Delegate, PoseSnapshot } from '../types';
+import { VideoFramePump } from '../providers/videoFramePump';
 
 export type PerceptionContext = 'hand' | 'pose';
 export type RuntimeStatus = 'loading' | 'ready' | 'fallback' | 'error';
@@ -20,6 +21,12 @@ export interface PoseProviderCallbacks {
 export interface HandProviderClient {
   readonly isReady: boolean;
   init(callbacks: HandClientCallbacks, preferred?: Delegate): Promise<void>;
+  /** Optional live capture seam; `dispose` must stop it. Older adapters may use processFrame instead. */
+  beginCapture?(
+    video: HTMLVideoElement,
+    onHand: (snapshot: HandSnapshot, aspectY: number) => void,
+    onError?: (error: Error) => void,
+  ): void;
   processFrame(bitmap: ImageBitmap, timestampMs: number): Promise<HandSnapshot | undefined>;
   dispose(): void;
 }
@@ -48,28 +55,9 @@ export interface SpatialRuntimeOptions extends SpatialRuntimeCallbacks {
 
 type ActiveProvider = { context: 'hand'; client: HandProviderClient } | { context: 'pose'; client: PoseProviderClient };
 
-interface HandCaptureSession {
-  epoch: number;
-  video: HTMLVideoElement;
-  client: HandProviderClient;
-  capturing: boolean;
-  busy: boolean;
-  callbackId?: number;
-  rafId?: number;
-  lastVideoTime: number;
-  lastTimestamp: number;
-}
-
-type VideoFrameCallbackVideo = HTMLVideoElement & {
-  requestVideoFrameCallback?: (callback: (now: number, metadata: VideoFrameCallbackMetadata) => void) => number;
-  cancelVideoFrameCallback?: (handle: number) => void;
-};
-
 interface InitializationStatus {
   errorReported: boolean;
 }
-
-const HAVE_CURRENT_DATA = 2;
 
 /** Switches headless perception contexts and forwards typed observations from the active provider. */
 export class SpatialRuntime {
@@ -79,8 +67,8 @@ export class SpatialRuntime {
   private readonly callbacks: SpatialRuntimeCallbacks;
   private readonly createHandClient: () => HandProviderClient;
   private readonly createPoseClient?: () => PoseProviderClient;
+  private handFramePump?: VideoFramePump;
   private active?: ActiveProvider;
-  private handCapture?: HandCaptureSession;
   private generation = 0;
   private activation?: { context: PerceptionContext; generation: number; promise: Promise<boolean> };
 
@@ -222,79 +210,49 @@ export class SpatialRuntime {
   }
 
   private startHandCapture(active: Extract<ActiveProvider, { context: 'hand' }>, generation: number): void {
-    const session: HandCaptureSession = {
-      epoch: generation,
-      video: this.video,
-      client: active.client,
-      capturing: true,
-      busy: false,
-      lastVideoTime: -1,
-      lastTimestamp: 0,
-    };
-    this.handCapture = session;
-    this.scheduleHandFrame(session);
-  }
-
-  private scheduleHandFrame(session: HandCaptureSession): void {
-    if (!session.capturing || session.epoch !== this.generation) return;
-    const video = session.video as VideoFrameCallbackVideo;
-    if (typeof video.requestVideoFrameCallback === 'function') {
-      session.callbackId = video.requestVideoFrameCallback((now) => {
-        session.callbackId = undefined;
-        this.scheduleHandFrame(session);
-        void this.captureHandFrame(session, now);
-      });
+    if (active.client.beginCapture) {
+      active.client.beginCapture(
+        this.video,
+        (snapshot) => {
+          if (this.isCurrent(active, generation)) this.callbacks.onObservation({ source: 'hand', snapshot });
+        },
+        (error) => {
+          if (this.isCurrent(active, generation)) this.callbacks.onStatus('hand', 'error', error.message);
+        },
+      );
       return;
     }
-    session.rafId = requestAnimationFrame(() => {
-      session.rafId = undefined;
-      this.scheduleHandFrame(session);
-      if (session.video.currentTime !== session.lastVideoTime) {
-        session.lastVideoTime = session.video.currentTime;
-        void this.captureHandFrame(session, performance.now());
+
+    // Keep existing processFrame-only provider adapters working through the same scheduler.
+    const pump = new VideoFramePump();
+    this.handFramePump = pump;
+    pump.start(this.video, {
+      onFrame: async (timestampMs) => {
+        if (!this.isCurrent(active, generation) || this.video.videoWidth <= 0 || this.video.videoHeight <= 0) return;
+        let bitmap: ImageBitmap | undefined;
+        try {
+          bitmap = await createImageBitmap(this.video, { resizeWidth: 640, resizeQuality: 'low' });
+          if (!this.isCurrent(active, generation)) return;
+          const frame = bitmap;
+          const processing = active.client.processFrame(frame, timestampMs);
+          bitmap = undefined;
+          const snapshot = await processing;
+          if (snapshot && this.isCurrent(active, generation)) {
+            this.callbacks.onObservation({ source: 'hand', snapshot });
+          }
+        } finally {
+          bitmap?.close();
+        }
+      },
+      onError: (error) => {
+        if (this.isCurrent(active, generation)) this.callbacks.onStatus('hand', 'error', error.message);
       }
     });
   }
 
-  private async captureHandFrame(session: HandCaptureSession, now: number): Promise<void> {
-    if (
-      !session.capturing ||
-      session.epoch !== this.generation ||
-      this.handCapture !== session ||
-      session.busy ||
-      session.video.readyState < HAVE_CURRENT_DATA
-    ) {
-      return;
-    }
-    session.busy = true;
-    const timestampMs = Math.max(now, session.lastTimestamp + 0.01);
-    session.lastTimestamp = timestampMs;
-    let bitmap: ImageBitmap | undefined;
-    try {
-      bitmap = await createImageBitmap(session.video, { resizeWidth: 640, resizeQuality: 'low' });
-      if (!this.isCurrentHandSession(session)) return;
-      const processing = session.client.processFrame(bitmap, timestampMs);
-      bitmap = undefined;
-      const snapshot = await processing;
-      if (snapshot && this.isCurrentHandSession(session)) {
-        this.callbacks.onObservation({ source: 'hand', snapshot });
-      }
-    } catch (error) {
-      if (this.isCurrentHandSession(session)) {
-        this.callbacks.onStatus('hand', 'error', error instanceof Error ? error.message : String(error));
-      }
-    } finally {
-      bitmap?.close();
-      session.busy = false;
-    }
-  }
-
-  private isCurrentHandSession(session: HandCaptureSession): boolean {
-    return session.capturing && session.epoch === this.generation && this.handCapture === session;
-  }
-
   private disposeActive(): void {
-    this.stopHandCapture();
+    this.handFramePump?.stop();
+    this.handFramePump = undefined;
     const active = this.active;
     this.active = undefined;
     if (!active) return;
@@ -306,13 +264,4 @@ export class SpatialRuntime {
     }
   }
 
-  private stopHandCapture(): void {
-    const session = this.handCapture;
-    this.handCapture = undefined;
-    if (!session) return;
-    session.capturing = false;
-    const video = session.video as VideoFrameCallbackVideo;
-    if (session.callbackId !== undefined) video.cancelVideoFrameCallback?.(session.callbackId);
-    if (session.rafId !== undefined) cancelAnimationFrame(session.rafId);
-  }
 }

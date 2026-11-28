@@ -134,4 +134,31 @@ describe('track blackout adjudication', () => {
     game.dispose();
     canvas.remove();
   });
+
+  it('keeps visual track travel moving during a degraded coasting frame', () => {
+    const canvas = document.createElement('canvas');
+    document.body.append(canvas);
+    const game = new TrackGame(canvas, () => {});
+    const update = loopState.update!;
+    let now = 1000;
+    let nextEventId = 1;
+    const step = (seconds: number, trackingState: SportActionEvent['trackingState'], speed01: number) => {
+      const frames = Math.round(seconds * 60);
+      for (let frame = 0; frame < frames; frame += 1) {
+        now += 1000 / 60;
+        if (frame % 5 === 0) game.onAction({ ...sprint(now, trackingState, speed01), id: nextEventId++ });
+        update(1 / 60, now, now);
+      }
+    };
+
+    game.setTracking('TRACKING');
+    step(3, 'tracked', 0);
+    step(0.6, 'tracked', 0.9);
+    const internals = game as unknown as { travelled: number };
+    const travelledBefore = internals.travelled;
+    for (let i = 0; i < 15; i += 1) step(1 / 60, 'degraded', 0.7);
+    expect(internals.travelled).toBeGreaterThan(travelledBefore);
+    game.dispose();
+    canvas.remove();
+  });
 });

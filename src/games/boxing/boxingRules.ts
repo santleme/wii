@@ -14,6 +14,8 @@
 export type BoxingSide = 'player' | 'opponent';
 export type BoxingWinner = BoxingSide | 'draw';
 export type BoxingOpening = 'open' | 'guard';
+export type PlayerPunchKind = 'unknown' | 'straight' | 'hook' | 'uppercut';
+export type PlayerPunchTarget = 'unknown' | 'head' | 'body';
 
 export const MAX_HP = 100;
 export const ROUND_COUNT = 3;
@@ -70,15 +72,38 @@ function punch(state: BoxingState, attacker: BoxingSide, rawDamage: number): Pun
   return { state: next, damage, ko };
 }
 
+/** Uppercut commitment bonus when the opponent is open. */
+export const UPPERCUT_OPEN_MULTIPLIER = 1.25;
+/** A hook's arc partially bypasses a high guard. */
+export const HOOK_GUARD_PENETRATION = 0.5;
+/** Body punches cost less HP but the high guard does not protect the body at all. */
+export const BODY_DAMAGE_MULTIPLIER = 0.75;
+
 /**
  * `power01` is clamped to 0..1; a non-finite power counts as 0 (weakest punch). A `counter`
- * goes through the guard.
+ * goes through the guard. Type and target modulate risk/reward without creating impossible
+ * punches, and anything unrecognized degrades to the generic straight-to-the-head behavior:
+ * - uppercut into an opening hits harder;
+ * - hook partially penetrates the guard;
+ * - body punches do reduced damage, but the high guard never blocks them.
  */
-export function applyPlayerPunch(state: BoxingState, power01: number, opening: BoxingOpening, counter = false): PunchResult {
+export function applyPlayerPunch(
+  state: BoxingState,
+  power01: number,
+  opening: BoxingOpening,
+  counter = false,
+  kind: PlayerPunchKind = 'unknown',
+  target: PlayerPunchTarget = 'unknown',
+): PunchResult {
   const power = Number.isFinite(power01) ? Math.min(1, Math.max(0, power01)) : 0;
-  const damage = Math.round(PLAYER_MIN_DAMAGE + (PLAYER_MAX_DAMAGE - PLAYER_MIN_DAMAGE) * power);
+  let damage = Math.round(PLAYER_MIN_DAMAGE + (PLAYER_MAX_DAMAGE - PLAYER_MIN_DAMAGE) * power);
+  if (kind === 'uppercut' && opening === 'open') damage = Math.round(damage * UPPERCUT_OPEN_MULTIPLIER);
+  if (target === 'body') damage = Math.max(1, Math.round(damage * BODY_DAMAGE_MULTIPLIER));
   if (counter) return punch(state, 'player', Math.round(damage * COUNTER_MULTIPLIER));
-  return punch(state, 'player', opening === 'guard' ? 0 : damage);
+  if (opening !== 'guard') return punch(state, 'player', damage);
+  if (target === 'body') return punch(state, 'player', damage);
+  if (kind === 'hook') return punch(state, 'player', Math.round(damage * HOOK_GUARD_PENETRATION));
+  return punch(state, 'player', 0);
 }
 
 /** The winner on time: more HP, equal is a draw. */
@@ -90,11 +115,14 @@ function decide({ playerHp, opponentHp }: BoxingState): BoxingWinner {
  * A player punch thrown before a bell but confirmed after it. On a match the clock already
  * decided, it can knock out or change the decision; a knockout is never reopened.
  */
-export function applyLatePunch(state: BoxingState, power01: number, opening: BoxingOpening, counter = false): PunchResult {
+export function applyLatePunch(
+  state: BoxingState, power01: number, opening: BoxingOpening, counter = false,
+  kind: PlayerPunchKind = 'unknown', target: PlayerPunchTarget = 'unknown',
+): PunchResult {
   const onTime = state.winner !== undefined && state.roundMsLeft === 0 && state.playerHp > 0 && state.opponentHp > 0;
-  if (!onTime) return applyPlayerPunch(state, power01, opening, counter);
+  if (!onTime) return applyPlayerPunch(state, power01, opening, counter, kind, target);
   const { winner: _decision, ...open } = state;
-  const result = applyPlayerPunch(open, power01, opening, counter);
+  const result = applyPlayerPunch(open, power01, opening, counter, kind, target);
   if (result.ko) return result;
   return { ...result, state: Object.freeze({ ...result.state, winner: decide(result.state) }) };
 }

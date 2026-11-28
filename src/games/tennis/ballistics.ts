@@ -207,3 +207,19 @@ export function timeAtPlane(
   }
   return null;
 }
+
+/**
+ * As solveOutgoing, but lofted until the ball clears the net by `clearance`: as in the console game,
+ * a stroke that connects does not die on the tape.
+ */
+export function solveOverNet(from: Vec3, target: { x: number; z: number }, flightSeconds: number, clearance = 1.25): Vec3 {
+  let seconds = flightSeconds;
+  let velocity = solveOutgoing(from, target, seconds);
+  for (let tries = 0; tries < 20; tries += 1) {
+    const atNet = -from.z / velocity.z;
+    if (!(atNet > 0) || advanceBall(createBall(from, velocity, 'player'), atNet).position.y >= clearance) break;
+    seconds *= 1.08;
+    velocity = solveOutgoing(from, target, seconds);
+  }
+  return velocity;
+}

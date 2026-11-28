@@ -1,12 +1,17 @@
-import type { PoseSnapshot, TrackingState } from '../cv/protocol';
+import type { PoseSnapshot, TrackingState } from '@wii/spatial-core';
 import { landmarkConfidence } from './math';
 
 const CORE_BODY_LANDMARKS = [11, 12, 23, 24] as const;
 /**
- * Per-landmark confidence floor — the BlazePose author's recommended sigmoid threshold
- * (mediapipe issue #1351: "reasonable threshold will be 0.5").
+ * Per-landmark confidence floor to enter 'tracked' — the BlazePose author's recommended sigmoid
+ * threshold (mediapipe issue #1351: "reasonable threshold will be 0.5").
  */
 const CONFIDENCE_FLOOR = 0.5;
+/**
+ * Dual-threshold hysteresis floor to STAY in 'tracked' once confirmed: fast motion blur dips
+ * MediaPipe's landmark visibility score by ~15-25% even while the ROI tracker is still locked on.
+ */
+const STAY_TRACKED_FLOOR = 0.35;
 /**
  * Consecutive good frames to confirm tracking. Reacquisition stays fast because gesture
  * reaction needs it; only presence abandonment is slow (DeepSORT confirms in 3 frames too).
@@ -49,8 +54,9 @@ export class TrackingGate {
     const required = requiredIndices.map((index) => points[index]);
     const complete = required.length > 0 && required.every((point) => point !== undefined);
     const confidence = complete ? landmarkConfidence(...required) : 0;
-    if (complete && confidence >= CONFIDENCE_FLOOR) {
-      this.goodFrames += 1;
+    const activeFloor = this.state === 'tracked' ? STAY_TRACKED_FLOOR : CONFIDENCE_FLOOR;
+    if (complete && confidence >= activeFloor) {
+      if (confidence >= CONFIDENCE_FLOOR) this.goodFrames += 1;
       this.lastGoodAt = snapshot.timestampMs;
       if (this.goodFrames >= GOOD_FRAMES_TO_TRACKED) this.state = 'tracked';
       else if (this.state !== 'tracked') this.state = 'degraded';

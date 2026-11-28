@@ -74,6 +74,7 @@ class FakeHandClient implements HandProviderClient {
   readonly frames: { bitmap: ImageBitmap; timestampMs: number }[] = [];
   initialize?: Promise<void>;
   frameResult: Promise<HandSnapshot | undefined> = Promise.resolve(undefined);
+  throwOnProcessFrame = false;
 
   async init(callbacks: HandClientCallbacks, _preferred?: Delegate): Promise<void> {
     callbacks.onStatus('loading', 'hand loading');
@@ -85,6 +86,7 @@ class FakeHandClient implements HandProviderClient {
 
   processFrame(bitmap: ImageBitmap, timestampMs: number): Promise<HandSnapshot | undefined> {
     this.frames.push({ bitmap, timestampMs });
+    if (this.throwOnProcessFrame) throw new Error('adapter failed before accepting the frame');
     return this.frameResult;
   }
 
@@ -92,6 +94,26 @@ class FakeHandClient implements HandProviderClient {
     this.disposeCount += 1;
     this.disposed = true;
     this.isReady = false;
+  }
+}
+
+class CapturingHandClient extends FakeHandClient {
+  beginCount = 0;
+  captureVideo?: HTMLVideoElement;
+  private onHand?: (snapshot: HandSnapshot, aspectY: number) => void;
+
+  beginCapture(
+    video: HTMLVideoElement,
+    onHand: (snapshot: HandSnapshot, aspectY: number) => void,
+    _onError?: (error: Error) => void,
+  ): void {
+    this.beginCount += 1;
+    this.captureVideo = video;
+    this.onHand = onHand;
+  }
+
+  emitHand(snapshot: HandSnapshot, aspectY: number): void {
+    this.onHand?.(snapshot, aspectY);
   }
 }
 
@@ -198,6 +220,25 @@ describe('SpatialRuntime context switching', () => {
     expect(ReadyPoseWorker.instance?.terminated).toBe(true);
   });
 
+  it('uses a hand provider live-capture API when the provider owns its scheduler', async () => {
+    const video = makeVideo();
+    const hand = new CapturingHandClient();
+    const poseClient = new FakePoseClient();
+    const { runtime, onObservation } = makeRuntime(video, () => hand, () => poseClient);
+
+    await expect(runtime.activate('hand')).resolves.toBe(true);
+
+    expect(hand.beginCount).toBe(1);
+    expect(hand.captureVideo).toBe(video);
+    expect(hand.frames).toEqual([]);
+
+    hand.emitHand(handSnapshot(12), 0.75);
+    expect(onObservation).toHaveBeenCalledWith({ source: 'hand', snapshot: handSnapshot(12) });
+
+    runtime.dispose();
+    expect(hand.disposeCount).toBe(1);
+  });
+
   it('deduplicates same-context activation and disposes a stale provider after a slower init resolves', async () => {
     const handInitialization = deferred<void>();
     const hand = new FakeHandClient();
@@ -280,6 +321,30 @@ describe('SpatialRuntime context switching', () => {
     runtime.dispose();
   });
 
+  it('closes a bitmap when a processFrame adapter throws before taking ownership', async () => {
+    const video = makeVideo();
+    const hand = new FakeHandClient();
+    hand.throwOnProcessFrame = true;
+    const poseClient = new FakePoseClient();
+    const { runtime, onStatus } = makeRuntime(video, () => hand, () => poseClient);
+    const bitmap = { close: vi.fn() } as unknown as ImageBitmap;
+    const createImageBitmapMock = vi.fn(async () => bitmap);
+    vi.stubGlobal('createImageBitmap', createImageBitmapMock);
+
+    await runtime.activate('hand');
+    video.fireFrame(10);
+    await flushAsyncFrame();
+
+    expect(hand.frames).toHaveLength(1);
+    expect(bitmap.close).toHaveBeenCalledOnce();
+    expect(onStatus).toHaveBeenCalledWith(
+      'hand',
+      'error',
+      'adapter failed before accepting the frame',
+    );
+    runtime.dispose();
+  });
+
   it('drops a hand result that arrives after switching to pose', async () => {
     const video = makeVideo();
     const hand = new FakeHandClient();
@@ -304,6 +369,46 @@ describe('SpatialRuntime context switching', () => {
     await flushAsyncFrame();
 
     expect(onObservation).not.toHaveBeenCalled();
+    runtime.dispose();
+  });
+
+  it('starts a fresh legacy-adapter pump when a new hand provider replaces pending work', async () => {
+    const video = makeVideo();
+    const firstHand = new FakeHandClient();
+    const pendingOldResult = deferred<HandSnapshot | undefined>();
+    firstHand.frameResult = pendingOldResult.promise;
+    const secondHand = new FakeHandClient();
+    const newSnapshot = handSnapshot(20);
+    secondHand.frameResult = Promise.resolve(newSnapshot);
+    const clients = [firstHand, secondHand];
+    const poseClient = new FakePoseClient();
+    const { runtime, onObservation } = makeRuntime(
+      video,
+      () => clients.shift()!,
+      () => poseClient,
+    );
+    const bitmaps = [
+      { close: vi.fn() } as unknown as ImageBitmap,
+      { close: vi.fn() } as unknown as ImageBitmap,
+    ];
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmaps.shift()!));
+
+    await runtime.activate('hand');
+    video.fireFrame(10);
+    await flushAsyncFrame();
+    expect(firstHand.frames).toHaveLength(1);
+
+    await runtime.activate('pose');
+    await runtime.activate('hand');
+    video.fireFrame(20);
+    await flushAsyncFrame();
+
+    expect(secondHand.frames).toHaveLength(1);
+    expect(onObservation).toHaveBeenCalledWith({ source: 'hand', snapshot: newSnapshot });
+
+    pendingOldResult.resolve(handSnapshot(10));
+    await flushAsyncFrame();
+    expect(onObservation).toHaveBeenCalledTimes(1);
     runtime.dispose();
   });
 });

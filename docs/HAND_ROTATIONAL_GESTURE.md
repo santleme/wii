@@ -47,8 +47,8 @@ A base da palma preserva a rotação global da mão no espaço da câmera. Isso 
 
 ## Estados e arbitragem
 
-- `ROTATION_CANDIDATE`: 100 ms de evidência antes de assumir controle; cliques de pinça e progresso de punho já ficam retidos.
-- `ROTATING`: a velocidade angular arbitrada alimenta o carrossel; hover, clique e voltar ficam bloqueados.
+- `ROTATION_CANDIDATE`: 110 ms de evidência antes de assumir controle. Ainda não bloqueia nada: pinça, voltar e swipe seguem ativos, e uma pinça em andamento desliga a rotação.
+- `ROTATING`: a velocidade angular arbitrada alimenta o carrossel; hover, clique, voltar e swipe ficam bloqueados.
 - `RECOVERY`: o retorno passivo da mão mantém momentum; pequenas velocidades contrárias são zeradas. Uma reversão exige impulso acima de limiar maior com histerese.
 - `BRAKING`: palma aberta; a velocidade de controle vai a zero e o carrossel desacelera imediatamente.
 - `SNAP_TO_CARD`: o canal mais próximo (`Math.round(turn)`) vira alvo do snap.
@@ -58,14 +58,14 @@ A base da palma preserva a rotação global da mão no espaço da câmera. Isso 
 
 | Parâmetro | Valor | Motivo |
 |---|---:|---|
-| `candidateMs` | 100 ms | dentro da faixa pedida (80–120 ms), evita falso positivo de microgestos |
-| `rotationMinSpeedDegPerSec` | 45°/s | zona morta contra jitter da reconstrução 3D |
-| `rotationEnterSpeedDegPerSec` | 85°/s | impulso claramente intencional |
-| `rotationReverseSpeedDegPerSec` | 125°/s | reversão exige mais energia que a entrada |
-| `maxAngularSpeedDegPerSec` | 360°/s | teto de uma volta visual por segundo |
-| `brakeOpenMs` | 70 ms | palma aberta precisa persistir brevemente antes do snap |
+| `candidateMs` | 110 ms | evita que mover a mão ou pinçar vire rotação; o primeiro frame conta no máximo metade |
+| `candidateMinSpeedDegPerSec` | 70°/s | acima do giro incidental de quem só move a mão |
+| `maxFrameGapMs` | 250 ms | tolera a cadência de webcams lentas |
+| `reversalSpeedDegPerSec` | 95°/s | reversão exige mais energia que a entrada |
+| `maxAngularVelocityDegPerSec` | 360°/s | teto de uma volta visual por segundo |
+| `brakeSnapDelayMs` | 65 ms | palma aberta precisa persistir brevemente antes do snap |
 | `snapSignalMs` | 300 ms | dá tempo de o carrossel completar o snap de 180–250 ms |
-| `cuppedMinCurvature` / `openPalmMaxCurvature` | 0.15 / 0.08 | curvatura por cossenos articulares; separa concha de palma aberta com histerese |
+| `cuppedMinCurvature` / `openPalmMaxCurvature` | 0.13 / 0.06 | curvatura por cossenos articulares; separa concha de palma aberta com histerese |
 | `snapDurationMs` do carrossel | 220 ms | clamped em 180–250 ms |
 | `driveResponseMs` / `brakeResponseMs` | 90 / 42 ms | resposta suave ao impulso e frenagem quase imediata |
 
@@ -81,7 +81,11 @@ O controlador integra com `deltaTime` real do `requestAnimationFrame`:
 - `SNAP_TO_CARD` ou momentum baixo: snap ease-in-out para o canal inteiro mais próximo;
 - `prefers-reduced-motion`: o snap é imediato e a animação orbital do cursor é desligada.
 
-Quando não há mão sincronizada — inclusive após desligar a câmera — o loop de `requestAnimationFrame` é estacionado; mouse e transições CSS não dependem dele. Amostras de mão mais velhas que 150 ms são tratadas como ociosas, evitando que um frame `ROTATING` parado continue acelerando a roda. Cliques de mouse/setas assumem ownership por 900 ms — a duração da transição CSS — para que um flick no meio da animação não salte do alvo. O componente React continua sendo a interface para mouse/teclado: setas e clique em canais chamam `syncTurn` no controlador e preservam a transição CSS existente. Durante controle por gesto, o controlador escreve `left/top/transform/opacity/zIndex` diretamente nos canais e a classe `is-gesture-controlled` remove as transições que disputariam o mesmo atributo. React é sincronizado somente quando o canal frontal muda ou quando o movimento assenta.
+O loop de `requestAnimationFrame` roda enquanto a roda está pronta, com ou sem mão; ocioso, não move nada, e mouse e transições CSS não dependem dele. Amostras de mão mais velhas que 150 ms são tratadas como ociosas, evitando que um frame `ROTATING` parado continue acelerando a roda. Cliques de mouse/setas assumem ownership por 900 ms — a duração da transição CSS — para que um flick no meio da animação não salte do alvo. O componente React continua sendo a interface para mouse/teclado: setas e clique em canais chamam `syncTurn` no controlador e preservam a transição CSS existente. Durante controle por gesto, o controlador escreve `left/top/transform/opacity/zIndex` diretamente nos canais e a classe `is-gesture-controlled` remove as transições que disputariam o mesmo atributo. React é sincronizado somente quando o canal frontal muda ou quando o movimento assenta.
+
+## Swipe lateral
+
+`src/kinematics/handSwipe.ts` avança ou volta um canal com um movimento horizontal rápido (mão para a esquerda avança). Exige 1,55 largura de imagem por segundo por 40 ms, em pelo menos duas amostras e predominantemente horizontal (1,25× a vertical), com a mão antes em repouso. Há cooldown de 350 ms no mesmo sentido e 450 ms no oposto. Fica bloqueado durante pinça, punho e rotação comprometida, e a pinça só rearma quando a mão desacelera. Um alcance muito rápido do cursor também pode dispará-lo.
 
 ## Diagnóstico opcional
 
@@ -113,9 +117,9 @@ Cobertura adicionada/estendida:
 4. Confira no overlay: forma `cupped`, fase `ROTATING`, direção coerente e velocidade de controle abaixo de 360°/s.
 5. Retorne a mão sem girar no sentido contrário: a roda deve continuar por momentum curto.
 6. Abra a palma: deve entrar `BRAKING`, depois `SNAP_TO_CARD`; a roda deve parar no canal mais próximo.
-7. Durante o gesto, aproxime polegar/indicador ou feche o punho: nenhum clique/voltar deve ocorrer. Ao terminar, solte e refaça o gesto de pinça para confirmar o rearme.
-8. Entre na tela de jogos ou desligue a câmera no meio do gesto: a rotação deve cancelar e o gate voltar a falso.
+7. Com a fase em `ROTATING`, aproxime polegar/indicador ou feche o punho: nenhum clique/voltar deve ocorrer. Ao terminar, solte e refaça o gesto de pinça para confirmar o rearme.
+8. Inicie um jogo ou desligue a câmera no meio do gesto: a rotação deve cancelar e o gate voltar a falso.
 
 ### Calibração
 
-Se a webcam estiver baixa ou a mão muito distante, aumente `candidateMs` ou `rotationEnterSpeedDegPerSec`. Se palmas abertas forem classificadas como concha, reduza levemente `openCurvatureMax`; se a concha for classificada como aberta, aumente `cuppedCurvatureMin`. Faça mudanças pequenas e revalide com os testes determinísticos antes da webcam.
+Se a webcam estiver baixa ou a mão muito distante, aumente `candidateMs` ou `candidateMinSpeedDegPerSec`. Se palmas abertas forem classificadas como concha, aumente `cuppedMinCurvature`; se a concha for classificada como aberta, reduza `openPalmMaxCurvature`. Faça mudanças pequenas e revalide com os testes determinísticos antes da webcam.

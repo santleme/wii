@@ -26,6 +26,17 @@
   .channel.sports:hover { box-shadow: 0 12px 30px rgba(26, 110, 168, .5), 0 0 0 7px #34beed66, inset 0 -10px 18px #34beed55; }
   .channel.empty { padding: 0; cursor: pointer; }
   .channel.empty:hover, .channel.empty:focus-visible { box-shadow: 0 0 0 5px #34beed66, var(--shadow); }
+  .channel.sport-channel { overflow: hidden; padding: 0; display: flex; flex-direction: column; background: #fff; border-color: #fff; color: var(--ink); }
+  .sport-channel:hover, .sport-channel:focus-visible { box-shadow: 0 0 0 5px #34beed88, var(--shadow); }
+  .channel-scene { flex: 1; width: 100%; }
+  .channel-name { width: 100%; padding: 5px; background: var(--gloss); font-size: clamp(14px, 1.8vw, 24px); font-weight: 800; }
+  .sport-channel.athletics .channel-scene { background: linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #4e9e52 42% 52%, #0000 52%), repeating-linear-gradient(#c8603f 0 13%, #fff 13% 14%); }
+  .sport-channel.tennis .channel-scene { background: linear-gradient(90deg, #0000 49.6%, #fff 49.6% 50.4%, #0000 50.4%) 50% 100% / 100% 40% no-repeat, linear-gradient(#0000 68%, #fff 68% 70%, #0000 70%), linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #3f8f4b 42% 48%, #3f78b5 48%); }
+  .sport-channel.boxing .channel-scene { background: radial-gradient(circle at 38% 58%, #d64545 0 9%, #0000 9.5%), radial-gradient(circle at 62% 58%, #2f6fd0 0 9%, #0000 9.5%), repeating-linear-gradient(#0000 0 8%, #fff 8% 9.5%, #0000 9.5% 14%) 50% 70% / 100% 40% no-repeat, linear-gradient(#26313b 0 52%, #d9c9a3 52%); }
+  .goal-overlay { position: absolute; inset: 0; z-index: 35; display: grid; place-items: center; padding: 20px; background: #32434da6; }
+  .goal-dialog { display: flex; flex-direction: column; align-items: center; gap: 22px; padding: 28px; border: 4px solid var(--blue); border-radius: 24px; background: var(--gloss); box-shadow: 0 10px 35px #24374377; }
+  .goal-dialog h2 { margin: 0; font-size: clamp(22px, 3vw, 32px); }
+  .goal-back { padding: 8px 24px; }
   .ring-arrow { position: absolute; z-index: 25; top: 50%; width: 52px; height: 52px; translate: 0 -50%; border: 3px solid var(--blue); border-radius: 50%; color: var(--blue-deep); background: linear-gradient(#fff 0 46%, #d9f2fd 54%, #ade4f8); box-shadow: 0 5px 14px rgba(26, 110, 168, .35), inset 0 1px #fff; }
   .ring-arrow.left { left: 3%; }
   .ring-arrow.right { right: 3%; }
@@ -40,64 +51,17 @@
   .wii-clock strong { font-size: clamp(22px, 4.5vh, 40px); }
   .wii-clock span { font-size: 14px; }
 
-  /* entrar no canal: 1) a câmera avança sobre o botão, 2) o branco nasce no meio da tela, 3) os jogos caem já montados */
-  .channels.is-opening { overflow: hidden; pointer-events: none; }
-  .channels.is-opening > .channel-ring { transform-origin: var(--zx, 50%) var(--zy, 50%); animation: channel-approach 1.25s cubic-bezier(.55, 0, .75, .35) forwards; }
-  .channels.is-opening > .wii-bar { transition: transform .9s ease-in, opacity .6s ease-in; transform: translateY(35%); opacity: 0; }
-  .channel-whiteout { position: absolute; inset: 0; z-index: 30; background: radial-gradient(circle farthest-corner at 50% 50%, #fff 0, #fff calc(var(--wo) - 28%), #fff0 var(--wo)); animation: channel-whiteout .8s cubic-bezier(.45, 0, .3, 1) .55s both; }
+  .games-goals { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; }
+  .games-goal { min-width: min(190px, 38vw); padding: 16px 24px; border-radius: 18px; font-size: clamp(20px, 2.6vw, 28px); }
 
-  /* a tela em si não esmaece (nada de ver o que ficou atrás); só o conteúdo dela surge */
-  .menu.title { animation: none; }
-  .title .title-card .logo, .title .stripes { animation: menu-in .5s ease .1s both; }
-  .title .title-actions { animation: title-actions-in .45s ease .35s both; }
-  .menu.title { background: var(--gloss); }
-  .title-card { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; background: radial-gradient(#0000000d 30%, #0000 32%) 0 0 / 42px 42px, linear-gradient(#e3e6e8, #fff 70%); }
-  .title-card .logo { font-size: clamp(48px, 11vw, 150px); }
-  .stripes { align-self: stretch; height: 34px; margin-bottom: 7vh; background: linear-gradient(var(--orange) 0 40%, #fff 40% 55%, var(--blue) 55%); }
-  .title-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 4vw; padding: 5vh 16px; border-top: 2px solid var(--line); background: repeating-linear-gradient(#0000 0 3px, #ffffff80 3px 4px), #d9dde0; }
-  .wii-btn.pill { width: min(340px, 80vw); padding: 18px; font-size: 26px; }
-
-  .sports-menu { background: #fff; }
-  .menu-header { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; padding: 56px 4vw 0; border-bottom: 5px double var(--line); }
-  .menu-header h1 { margin: 0; padding: 8px 52px 8px 24px; background: #858c92; color: #fff; font-size: 22px; font-weight: 500; clip-path: polygon(0 0, calc(100% - 28px) 0, 100% 100%, 0 100%); }
-  .menu-header .logo { font-size: clamp(26px, 4vw, 46px); }
-  .logo-btn { padding: 0; border: 0; background: none; transition: transform .18s; }
-  .logo-btn:hover { transform: scale(1.06); }
-  .menu-body { flex: 1; display: flex; flex-wrap: wrap; gap: 4vw; justify-content: center; align-items: center; align-content: center; padding: 24px 4vw; background: radial-gradient(circle at 70% 40%, #0000 28%, #ffffff30 28.5% 36%, #0000 36.5%), linear-gradient(135deg, #1c8fd1, #8fd6f3 55%, #2a9bd8); }
-  .sport-list { display: flex; flex-direction: column; gap: 14px; width: min(400px, 90vw); }
-  .sport-list .wii-btn { padding: 20px; border-color: #35434d; border-radius: 18px; font-size: 28px; }
-  .sport-list .wii-btn.selected { background: linear-gradient(#c9f1fb, #8fdcef 52%, #b2e9f5); }
-  .sport-list .wii-btn.back { align-self: flex-start; padding: 8px 24px; font-size: 16px; }
-  .preview { width: min(520px, 90vw); margin: 0; overflow: hidden; border: 6px solid #fff; border-radius: 24px; background: #fff; box-shadow: 0 8px 24px #0b4a6e66; }
-  .scene { aspect-ratio: 16/9; }
-  .preview.tennis .scene { background: linear-gradient(90deg, #0000 49.6%, #fff 49.6% 50.4%, #0000 50.4%) 50% 100% / 100% 40% no-repeat, linear-gradient(#0000 68%, #fff 68% 70%, #0000 70%), linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #3f8f4b 42% 48%, #3f78b5 48%); }
-  .preview.track .scene, .preview.athletics .scene { background: linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #4e9e52 42% 52%, #0000 52%), repeating-linear-gradient(#c8603f 0 13%, #fff 13% 14%); }
-  .preview.boxing .scene { background: radial-gradient(circle at 38% 58%, #d64545 0 9%, #0000 9.5%), radial-gradient(circle at 62% 58%, #2f6fd0 0 9%, #0000 9.5%), repeating-linear-gradient(#0000 0 8%, #fff 8% 9.5%, #0000 9.5% 14%) 50% 70% / 100% 40% no-repeat, linear-gradient(#26313b 0 52%, #d9c9a3 52%); }
-  .preview figcaption { padding: 12px; text-align: center; font-weight: 700; }
-
-  /* jogos: roda de cartões, o mesmo vocabulário do carrossel do menu inicial */
-  .games-body { position: relative; flex-direction: column; flex-wrap: nowrap; gap: 0; padding: 0; overflow: hidden; }
-  .games-ring { position: relative; flex: 1; width: 100%; min-height: 300px; }
-  .game-card { position: absolute; width: min(400px, 36vw); display: flex; flex-direction: column; overflow: hidden; padding: 0; border: 6px solid #fff; border-radius: 24px; background: #fff; color: var(--ink); box-shadow: 0 8px 24px #0b4a6e66; transition: left .7s cubic-bezier(.3, .8, .2, 1), top .7s cubic-bezier(.3, .8, .2, 1), transform .7s cubic-bezier(.3, .8, .2, 1), opacity .7s, box-shadow .25s; }
-  .game-card .scene { display: block; width: 100%; }
-  .game-card .game-name { display: block; padding: 12px; text-align: center; font-size: clamp(18px, 2.2vw, 28px); font-weight: 800; background: var(--gloss); }
-  .game-card.is-front { box-shadow: 0 12px 30px #0b4a6e80, 0 0 0 5px #34beed88; }
-  .game-card.is-front:hover, .game-card.is-front:focus-visible { box-shadow: 0 14px 34px #0b4a6e99, 0 0 0 8px #ffffffcc; }
-  .game-card:not(.is-front) { cursor: pointer; }
-  .game-card.tennis .scene { background: linear-gradient(90deg, #0000 49.6%, #fff 49.6% 50.4%, #0000 50.4%) 50% 100% / 100% 40% no-repeat, linear-gradient(#0000 68%, #fff 68% 70%, #0000 70%), linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #3f8f4b 42% 48%, #3f78b5 48%); }
-  .game-card.athletics .scene { background: linear-gradient(#8cc9f2 0%, #dcf0fb 42%, #4e9e52 42% 52%, #0000 52%), repeating-linear-gradient(#c8603f 0 13%, #fff 13% 14%); }
-  .game-card.boxing .scene { background: radial-gradient(circle at 38% 58%, #d64545 0 9%, #0000 9.5%), radial-gradient(circle at 62% 58%, #2f6fd0 0 9%, #0000 9.5%), repeating-linear-gradient(#0000 0 8%, #fff 8% 9.5%, #0000 9.5% 14%) 50% 70% / 100% 40% no-repeat, linear-gradient(#26313b 0 52%, #d9c9a3 52%); }
-  /* chegada: nasce do branco e os cartões caem e quicam */
-  .menu.sports-menu { animation: none; }
-  .menu.sports-menu::after { content: ''; position: absolute; inset: 0; z-index: 40; background: #fff; pointer-events: none; animation: games-from-white .8s ease-out both; }
-  .game-card { animation: game-drop 1.15s both; }
-  .game-card:nth-of-type(1) { animation-delay: .12s; }
-  .game-card:nth-of-type(2) { animation-delay: .26s; }
-  .game-card:nth-of-type(3) { animation-delay: .4s; }
-  .games-hint, .games-back, .games-ring .ring-arrow { animation: games-fade .5s ease-out 1s both; }
-  .games-ring.is-gesture-controlled .game-card { transition: box-shadow .25s; }
-  .games-hint { position: relative; z-index: 21; margin: 0; padding: 0 4vw 28px; text-align: center; color: #fff; font-size: 18px; font-weight: 700; text-shadow: 0 1px 3px #0b4a6e99; }
-  .games-back { position: absolute; z-index: 22; left: 4vw; bottom: 24px; padding: 8px 24px; font-size: 16px; }
+  .iron-summary { justify-content: center; align-items: center; padding: 24px; }
+  .iron-summary-card { width: min(560px, 100%); padding: clamp(24px, 5vw, 48px); border: 4px solid var(--blue); border-radius: 28px; background: var(--gloss); box-shadow: 0 12px 35px #4a606e55; text-align: center; }
+  .iron-eyebrow { color: var(--blue-deep); font-weight: 800; }
+  .iron-summary-card h1 { margin: 8px 0; font-size: clamp(28px, 5vw, 42px); }
+  .iron-summary-card ol { display: grid; gap: 10px; padding: 0; margin: 26px 0; list-style: none; text-align: left; }
+  .iron-summary-card li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 20px; padding: 12px 16px; border-radius: 14px; background: #e0f3fb; }
+  .iron-summary-card button { padding: 10px 26px; }
+  .iron-progress { position: absolute; z-index: 6; top: 62px; left: 50%; translate: -50% 0; padding: 6px 14px; border-radius: 999px; background: #ffffffdf; color: #176b92; font-size: 12px; font-weight: 800; white-space: nowrap; }
 
   /* jogo em tela cheia */
   .game-viewport { position: absolute; inset: 0; }
@@ -133,6 +97,30 @@
   .game-banner { position: absolute; left: 0; right: 0; top: 22%; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 16px; color: #fff; text-align: center; text-shadow: 0 3px 10px #000c; pointer-events: none; z-index: 4; }
   .game-banner strong { font-size: 68px; font-weight: 800; }
   .game-banner span { font-size: 14px; font-weight: 700; }
+  .game-viewport.tennis .game-banner { top: 12%; }
+  .game-viewport.tennis .game-banner strong { font-size: 40px; }
+  .game-viewport.tennis .game-banner span { font-size: 20px; }
+  .recording-prompt { position: absolute; left: 50%; bottom: 20%; transform: translateX(-50%); max-width: 90%; padding: 14px 22px; border-radius: 16px; background: #000c; color: #fff; font-size: 30px; font-weight: 800; text-align: center; pointer-events: none; z-index: 11; }
+  .framing-hint { position: absolute; left: 50%; top: 14%; transform: translateX(-50%); max-width: 90%; padding: 10px 18px; border-radius: 14px; background: #c0392b; color: #fff; font-size: 22px; font-weight: 800; text-align: center; pointer-events: none; z-index: 11; }
+  .perf-meter { position: absolute; left: 10px; bottom: 10px; max-width: 60%; padding: 6px 10px; border-radius: 8px; background: #000d; color: #7f7; font: 700 13px/1.4 monospace; pointer-events: none; z-index: 30; }
+  .game-viewport.athletics .game-ready { top: 92px; }
+  .game-viewport.athletics .game-controls { display: none; }
+  .restart-gesture { position: relative; margin: 0 0 10px; padding: 9px 12px; border: 3px solid var(--blue); border-radius: 999px; overflow: hidden; font-size: 13px; font-weight: 800; }
+  .restart-gesture b { position: absolute; inset: 0 auto 0 0; background: #ffd23f; }
+  .restart-gesture span { position: relative; }
+  .game-viewport.athletics .game-banner span { padding: 6px 16px; border-radius: 999px; background: #000a; font-size: 18px; text-shadow: none; }
+  .energy { position: absolute; left: 24px; top: 50%; transform: translateY(-50%); width: min(220px, 30vw); display: flex; flex-direction: column; gap: 6px; z-index: 8; pointer-events: none; color: #fff; font-weight: 800; text-shadow: 0 2px 6px #000c; }
+  .energy strong { font-size: 20px; line-height: 1.2; color: #ffe45c; }
+  .energy span { font-size: 12px; letter-spacing: 1px; }
+  .energy i { display: block; height: 28px; border: 3px solid #fff; border-radius: 999px; background: #0007; overflow: hidden; box-shadow: var(--shadow); }
+  .energy b { display: block; height: 100%; background: linear-gradient(90deg, #ffd23f, #ff7a1a 60%, #e8352b); transition: width .12s linear; }
+  .race-progress { position: absolute; right: 18px; top: 92px; width: min(260px, 40vw); padding: 8px 12px; border-radius: 16px; background: #ffffffe6; box-shadow: var(--shadow); z-index: 3; pointer-events: none; }
+  .race-progress div { display: grid; grid-template-columns: 46px 1fr; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; }
+  .race-progress i { height: 8px; border-radius: 999px; background: #d9e2e8; overflow: hidden; }
+  .race-progress b { display: block; height: 100%; background: #8795a0; }
+  .race-progress .you b { background: var(--orange); }
+  .game-viewport.is-framing ~ .cam-pip:not(.expanded) { width: min(420px, 60vw); right: 50%; transform: translateX(50%); }
+  .photo-notice { position: absolute; left: 10px; top: 10px; padding: 4px 10px; border-radius: 8px; background: #000c; color: #ffb4b4; font: 700 12px/1.4 monospace; pointer-events: none; z-index: 30; }
   /* uma animação por evento (a key do React reinicia) */
   .game-feedback { position: absolute; inset: 0; display: flex; justify-content: center; align-items: flex-start; pointer-events: none; z-index: 2; }
   .game-feedback span { margin-top: 18vh; color: #7be595; font-size: 34px; font-weight: 800; text-shadow: 0 2px 8px #000a; opacity: 0; animation: track-pop .9s ease-out; }
@@ -143,6 +131,20 @@
 
   .game-over { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(320px, 90vw); max-height: 90%; overflow: auto; padding: 20px; border: 3px solid var(--blue); border-radius: 24px; background: #fffffff5; box-shadow: var(--shadow); text-align: center; z-index: 9; }
   .game-over h2 { margin: 0 0 8px; font-size: 30px; color: #d64545; }
+  .game-viewport.tennis .game-ready { top: auto; bottom: 35px; max-width: 94%; white-space: normal; text-align: center; }
+  .tennis-score { position: absolute; top: 68px; left: 14px; z-index: 4; border-collapse: separate; border-spacing: 0; border-radius: 12px; overflow: hidden; background: #102d40; color: white; box-shadow: 0 4px 14px #11283b66; font-variant-numeric: tabular-nums; font-size: clamp(11px, 1.5vw, 15px); }
+  .tennis-score th, .tennis-score td { padding: 5px 9px; text-align: center; }
+  .tennis-score th:first-child { text-align: left; }
+  .tennis-score thead { background: #21516c; }
+  .tennis-score td:last-child { color: #ecf8a9; font-weight: 800; }
+  .tennis-server { margin-left: 6px; color: #d9f46c; }
+  @media (max-width: 600px) {
+    .stage:has(.game-viewport.tennis) .cam-pip:not(.expanded) { top: 68px; bottom: auto; }
+  }
+  .tennis-result h2 { color: var(--ink); }
+  .tennis-result p { margin-bottom: 12px; }
+  /* The framing screen already says what to fix; the head warning would repeat it on top. */
+  .game-viewport.is-framing ~ .framing-hint { display: none; }
   .game-over.finish h2 { color: var(--blue); }
   .game-goals { position: absolute; top: 60px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; margin: 0; padding: 0; border: 0; z-index: 9; }
   .game-goals button[aria-pressed='true'] { background: var(--blue); color: #fff; }
@@ -162,17 +164,6 @@
   .dock-btn.round { width: 38px; padding: 0; }
 
   /* controle por mão: painel */
-  .hand-panel { position: absolute; right: 14px; bottom: 14px; width: 250px; max-height: calc(100% - 70px); overflow: auto; display: flex; flex-direction: column; gap: 8px; padding: 10px; z-index: 11; border: 3px solid var(--blue); border-radius: 18px; background: var(--gloss); box-shadow: var(--shadow); text-align: center; }
-  .hand-preview { position: relative; flex: none; aspect-ratio: 4/3; display: grid; place-items: center; overflow: hidden; border-radius: 12px; background: #cfd8de; font-size: 13px; letter-spacing: 1px; }
-  .hand-status { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 5px 10px; border: 2px solid var(--line); border-radius: 999px; background: #fff; font-size: 12px; font-weight: 700; }
-  .hand-status i { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
-  .hand-status[data-state="searching"] { border-color: var(--orange); }
-  .hand-status[data-state="searching"] i { background: var(--orange); animation: hand-blink 1.2s ease-in-out infinite; }
-  .hand-status[data-state="synced"] { border-color: var(--green); background: #e3f6e8; }
-  .hand-status[data-state="synced"] i { background: var(--green); }
-  .hand-legend { margin: 0; padding: 0; list-style: none; color: #6d777f; font-size: 11px; line-height: 1.6; }
-  .hand-actions { display: flex; gap: 8px; justify-content: center; }
-  .hand-actions .wii-btn { padding: 7px 14px; font-size: 12px; }
 
   /* controle por mão: cursor (a ponta do indicador é a origem) */
   .hand-layer { position: fixed; inset: 0; z-index: 120; overflow: hidden; pointer-events: none; }
@@ -206,10 +197,9 @@
 
   /* pip da câmera */
   .cam-pip { position: absolute; right: 14px; bottom: 14px; width: 230px; z-index: 10; overflow: hidden; border: 3px solid var(--blue); border-radius: 18px; background: var(--gloss); box-shadow: 0 10px 28px #2a4a5c66; }
-  .cam-pip.is-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; border: 0; opacity: 0; pointer-events: none; }
   .cam-feed { position: relative; aspect-ratio: 4/3; background: #cfd8de; }
-  .cam-feed video, .cam-feed canvas, .hand-preview video, .hand-preview canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
-  .cam-feed canvas, .hand-preview canvas { z-index: 2; }
+  .cam-feed video, .cam-feed canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  .cam-feed canvas { z-index: 2; }
   .cam-empty { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: #5c6770; text-align: center; }
   .cam-empty strong { font-size: 13px; letter-spacing: 1px; }
   .cam-empty small { font-size: 10px; }
@@ -222,13 +212,17 @@
   .cam-status { padding: 0 10px 8px; color: #6d777f; font-size: 9px; line-height: 1.4; min-height: 16px; text-align: center; }
 
   @media (max-width: 640px) {
-    .cam-pip:not(.expanded):not(.is-hidden) { width: 160px; }
+    .cam-pip:not(.expanded) { width: 160px; }
     .game-hud div { min-width: 0; padding: 4px 10px; }
     .game-hud strong { font-size: 20px; }
     .game-controls { display: none; }
   }
 
   .pip-toggle { position: absolute; z-index: 6; top: 6px; right: 6px; min-width: 28px; height: 24px; padding: 0 8px; }
+  @media (orientation: portrait) and (max-height: 700px) {
+    .games-goals { gap: 10px; }
+    .games-goals .games-goal { padding-block: 8px; }
+  }
   .cam-pip.minimized { width: auto; overflow: visible; border: 0; background: none; box-shadow: none; }
   .minimized .pip-toggle { position: static; height: 38px; padding: 0 18px; border-width: 3px; font-size: 11px; }
   /* o vídeo segue renderizado (1px, invisível) para a captura de pose não parar */
@@ -263,10 +257,9 @@
   .wii-half.left { clip-path: inset(0 50% 0 0); --open: -50%; }
   .wii-half.right { clip-path: inset(0 0 0 50%); --open: 50%; }
   .wii-half span { color: transparent; background: linear-gradient(#34beed 25%, #1a8fc4 75%); -webkit-background-clip: text; background-clip: text; font: 700 clamp(90px, 22vw, 260px)/1 Arial, sans-serif; letter-spacing: -.04em; animation: wii-come .6s cubic-bezier(.2, .9, .3, 1.15) .5s backwards, wii-near .6s ease-in 1.5s forwards; }
-  @media (prefers-reduced-motion: reduce) { .menu, .title .title-card .logo, .title .stripes, .title .title-actions { animation: none; } .wii-btn, .channel { transition: none; } .hand-body { transition: none; } .hand-status[data-state="searching"] i, .hand-cursor.searching .track, .hand-cursor.syncing .track, .hand-pulse, .hand-cursor.rotating .hand-ring .fill, .hand-cursor.braking .hand-ring .fill { animation: none; } .hand-flash { animation-name: hand-flash-still; } }
+  @media (prefers-reduced-motion: reduce) { .menu { animation: none; } .wii-btn, .channel { transition: none; } .hand-body { transition: none; } .hand-cursor.searching .track, .hand-cursor.syncing .track, .hand-pulse, .hand-cursor.rotating .hand-ring .fill, .hand-cursor.braking .hand-ring .fill { animation: none; } .hand-flash { animation-name: hand-flash-still; } }
 }
 @keyframes menu-in { from { opacity: 0; transform: scale(.97); } }
-@keyframes hand-blink { 50% { opacity: .3; transform: scale(.7); } }
 @keyframes hand-blink-ring { 50% { opacity: .3; } }
 @keyframes hand-orbit { to { stroke-dashoffset: -22; } }
 @keyframes hand-pulse { from { opacity: .9; transform: scale(.5); } to { opacity: 0; transform: scale(1.25); } }
@@ -291,27 +284,13 @@
   transition: opacity .45s ease;
 }
 .arena-page .arena-exit:hover, .arena-page .arena-exit:focus-visible {
+  border-color: #34beed;
   transform: translateY(-3px);
   box-shadow: 0 10px 14px -4px rgba(26, 110, 168, .5), 0 3px 6px rgba(26, 110, 168, .3), inset 0 1px 1px #fff, inset 0 -6px 10px #34beed55;
 }
 .arena-page .arena-exit:hover::before, .arena-page .arena-exit:focus-visible::before { opacity: 1; }
 .arena-page .arena-exit:active { transform: translateY(-1px); transition-duration: .12s; }
 @media (prefers-reduced-motion: reduce) { .arena-page .arena-exit, .arena-page .arena-exit::before { transition: none; } }
-@keyframes title-actions-in { from { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .arena .menu.sports-menu::after { display: none; } .arena .game-card, .arena .games-hint, .arena .games-back, .arena .games-ring .ring-arrow { animation: none; } }
-@property --wo { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
-@keyframes games-from-white { to { opacity: 0; } }
-@keyframes games-fade { from { opacity: 0; } }
-@keyframes game-drop {
-  0% { translate: 0 -80vh; animation-timing-function: cubic-bezier(.5, 0, 1, .6); }
-  50% { translate: 0 0; animation-timing-function: cubic-bezier(0, .4, .5, 1); }
-  66% { translate: 0 -8%; animation-timing-function: cubic-bezier(.5, 0, 1, .6); }
-  80% { translate: 0 0; animation-timing-function: cubic-bezier(0, .4, .5, 1); }
-  90% { translate: 0 -2.5%; animation-timing-function: cubic-bezier(.5, 0, 1, .6); }
-  100% { translate: 0 0; }
-}
-@keyframes channel-approach { to { transform: scale(5); } }
-@keyframes channel-whiteout { from { --wo: 0%; } to { --wo: 135%; } }
 @keyframes wii-come { from { opacity: 0; filter: blur(14px); transform: scale(.08); } }
 @keyframes wii-near { to { transform: scale(1.5); } }
 @keyframes wii-open { to { transform: translateX(var(--open)); } }

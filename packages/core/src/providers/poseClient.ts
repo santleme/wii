@@ -1,4 +1,5 @@
 import type { Delegate, PoseSnapshot, WorkerReply, WorkerRequest } from './poseProtocol';
+import { VideoFramePump } from './videoFramePump';
 
 export interface PoseClientCallbacks {
   onPose(snapshot: PoseSnapshot): void;
@@ -8,27 +9,19 @@ export interface PoseClientCallbacks {
 export interface PoseClientAssets {
   wasmBaseUrl: string;
   modelUrl: string;
+  cpuModelUrl?: string;
 }
-
-/** Widest video sent as a raw VideoFrame; wider video is downscaled on the bitmap path. */
-const MAX_DIRECT_FRAME_WIDTH = 640;
-/** Bitmap copy width on the CPU delegate, where inference cost makes smaller input worthwhile. */
-const CPU_BITMAP_WIDTH = 320;
 
 export class PoseClient {
   private worker?: Worker;
   private ready = false;
   private activeDelegate?: Delegate;
   private initPromise?: Promise<void>;
-  private inFlight?: { requestId: number; captureEpoch: number };
+  private inFlight?: { requestId: number; captureEpoch: number; resolve(): void };
+  private readonly capturePump = new VideoFramePump();
   private nextRequestId = 1;
   private captureEpoch = 0;
   private capturing = false;
-  private lastTimestamp = 0;
-  private callbackId?: number;
-  private rafId?: number;
-  private lastVideoTime = -1;
-  private video?: HTMLVideoElement;
   private callbacks?: PoseClientCallbacks;
   private resolveInitialization?: () => void;
   private rejectInitialization?: (error: Error) => void;
@@ -63,38 +56,21 @@ export class PoseClient {
     this.callbacks = callbacks;
     if (!this.worker || !this.ready || this.capturing) return;
     this.captureEpoch += 1;
+    const captureEpoch = this.captureEpoch;
     this.capturing = true;
-    this.video = video;
-    this.lastVideoTime = -1;
     this.callbacks?.onStatus('ready', `MediaPipe pronto · ${this.activeDelegate} · capturando`);
-    const schedule = () => {
-      if (!this.capturing) return;
-      const supportsVideoFrameCallback = typeof (video as HTMLVideoElement & { requestVideoFrameCallback?: unknown }).requestVideoFrameCallback === 'function';
-      if (supportsVideoFrameCallback) {
-        this.callbackId = video.requestVideoFrameCallback((now) => {
-          schedule();
-          void this.capture(video, now);
-        });
-      } else {
-        this.rafId = requestAnimationFrame(() => {
-          schedule();
-          if (video.currentTime !== this.lastVideoTime) {
-            this.lastVideoTime = video.currentTime;
-            void this.capture(video, performance.now());
-          }
-        });
-      }
-    };
-    schedule();
+    if (!this.capturing || captureEpoch !== this.captureEpoch || !this.worker || !this.ready) return;
+    this.capturePump.start(video, {
+      onFrame: (timestampMs) => this.capture(video, timestampMs),
+      onError: (error) => {
+        if (this.capturing) this.callbacks?.onStatus('error', error.message);
+      },
+    });
   }
 
   pauseCapture(): void {
     this.capturing = false;
-    if (this.callbackId !== undefined) this.video?.cancelVideoFrameCallback?.(this.callbackId);
-    this.callbackId = undefined;
-    if (this.rafId !== undefined) cancelAnimationFrame(this.rafId);
-    this.rafId = undefined;
-    this.video = undefined;
+    this.capturePump.stop();
   }
 
   dispose(): void {
@@ -104,7 +80,9 @@ export class PoseClient {
     this.worker = undefined;
     this.ready = false;
     this.activeDelegate = undefined;
+    const pendingFrame = this.inFlight;
     this.inFlight = undefined;
+    pendingFrame?.resolve();
     this.initPromise = undefined;
     this.completeInitialization(new Error('PoseClient was disposed before initialization completed.'));
     this.callbacks = undefined;
@@ -130,15 +108,19 @@ export class PoseClient {
         this.activeDelegate = message.to;
         this.callbacks?.onStatus('fallback', 'GPU indisponível; usando CPU.');
       } else if (message.type === 'ERROR') {
-        if (message.stage === 'detect') {
+        // A fatal error belongs to the current worker, even after its frame was acknowledged.
+        if (message.stage === 'detect' && !message.fatal) {
           if (this.inFlight?.requestId !== message.requestId || this.inFlight.captureEpoch !== message.captureEpoch) return;
           this.releaseFrame(message.requestId, message.captureEpoch);
-          if (!message.fatal && message.captureEpoch !== this.captureEpoch) return;
+          if (message.captureEpoch !== this.captureEpoch) return;
         }
-        this.callbacks?.onStatus(message.fatal ? 'error' : 'fallback', message.message);
         if (message.fatal) {
+          const callbacks = this.callbacks;
           this.completeInitialization(new Error(message.message));
           this.dispose();
+          callbacks?.onStatus('error', message.message);
+        } else {
+          this.callbacks?.onStatus('fallback', message.message);
         }
       } else if (message.type === 'POSE') {
         if (this.inFlight?.requestId !== message.requestId || this.inFlight.captureEpoch !== message.captureEpoch) return;
@@ -196,23 +178,21 @@ export class PoseClient {
     else resolve?.();
   }
 
-  private async capture(video: HTMLVideoElement, now: number): Promise<void> {
+  private async capture(video: HTMLVideoElement, timestampMs: number): Promise<void> {
     if (this.inFlight || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     const requestId = this.nextRequestId++;
     const captureEpoch = this.captureEpoch;
     const frameRequest = { requestId, captureEpoch };
-    this.inFlight = frameRequest;
-    const timestampMs = Math.max(now, this.lastTimestamp + 0.01);
-    this.lastTimestamp = timestampMs;
-    // Owned by this thread until postMessage transfers it; cleared at that commit point.
-    let bitmap: ImageBitmap | VideoFrame | undefined;
+    let resolveFrame!: () => void;
+    const frameProcessed = new Promise<void>((resolve) => {
+      resolveFrame = resolve;
+    });
+    this.inFlight = { ...frameRequest, resolve: resolveFrame };
+    let bitmap: ImageBitmap | undefined;
     try {
-      // Synchronous when possible: no await means no session change can slip in before the post.
-      bitmap = this.directFrame(video, timestampMs)
-        ?? await createImageBitmap(video, {
-          resizeWidth: this.activeDelegate === 'CPU' ? CPU_BITMAP_WIDTH : MAX_DIRECT_FRAME_WIDTH,
-          resizeQuality: 'low',
-        });
+      bitmap = video.videoWidth > 640
+        ? await createImageBitmap(video, { resizeWidth: 640, resizeQuality: 'medium' })
+        : await createImageBitmap(video);
       if (!this.capturing || captureEpoch !== this.captureEpoch || !this.worker) {
         bitmap.close();
         this.releaseFrame(requestId, captureEpoch);
@@ -220,39 +200,32 @@ export class PoseClient {
       }
       this.worker.postMessage({ type: 'FRAME', ...frameRequest, timestampMs, bitmap } satisfies WorkerRequest, [bitmap]);
       bitmap = undefined;
+      await frameProcessed;
     } catch (error) {
       bitmap?.close();
       this.releaseFrame(requestId, captureEpoch);
-      if (this.capturing && captureEpoch === this.captureEpoch) {
-        this.callbacks?.onStatus('error', error instanceof Error ? error.message : String(error));
-      }
-    }
-  }
-
-  /** Undefined when the video needs downscaling or VideoFrame cannot be built from it. */
-  private directFrame(video: HTMLVideoElement, timestampMs: number): VideoFrame | undefined {
-    const maxWidth = this.activeDelegate === 'CPU' ? CPU_BITMAP_WIDTH : MAX_DIRECT_FRAME_WIDTH;
-    if (typeof VideoFrame === 'undefined' || !(video.videoWidth <= maxWidth)) return undefined;
-    try {
-      // VideoFrame timestamps are integer microseconds.
-      return new VideoFrame(video, { timestamp: Math.round(timestampMs * 1000) });
-    } catch {
-      return undefined;
+      throw error;
     }
   }
 
   private releaseFrame(requestId: number, captureEpoch: number): void {
-    if (this.inFlight?.requestId === requestId && this.inFlight.captureEpoch === captureEpoch) this.inFlight = undefined;
+    const pendingFrame = this.inFlight;
+    if (pendingFrame?.requestId !== requestId || pendingFrame.captureEpoch !== captureEpoch) return;
+    this.inFlight = undefined;
+    pendingFrame.resolve();
   }
 
   private confidence(points: PoseSnapshot['landmarks']): number {
-    const indices = [11, 12, 23, 24];
+    // Upper-body shoulders [11, 12] anchor presence: running arms and high knees routinely
+    // self-occlude the hips [23, 24] in a front-facing webcam without losing the player.
+    const indices = [11, 12];
     if (indices.some((index) => !points[index])) return 0;
     return Math.min(...indices.map((index) => {
       const point = points[index]!;
       const visibility = point.visibility ?? point.presence ?? 0;
       const presence = point.presence ?? point.visibility ?? 0;
-      return Math.min(visibility, presence);
+      const score = Math.min(visibility, presence);
+      return Number.isFinite(score) ? score : 0;
     }));
   }
 }

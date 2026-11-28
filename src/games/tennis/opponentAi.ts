@@ -51,12 +51,14 @@ export const DEFAULT_OPPONENT_AI_CONFIG: OpponentAiConfig = {
   minWidthScale: 0.25,
   shallowTargetZ: 3.5,
   deepTargetZ: 8.5,
-  slowFlightSeconds: 1.15,
-  fastFlightSeconds: 0.75,
+  slowFlightSeconds: 1.4,
+  fastFlightSeconds: 1.05,
 };
 
 export interface OpponentAiState {
   readonly skill: number;
+  /** Last observed lateral placements; reset with a new match, never inferred from missing input. */
+  readonly placements?: readonly (-1 | 1)[];
 }
 
 export type OpponentDecision =
@@ -136,5 +138,98 @@ export function adaptOpponentSkill(
   config: OpponentAiConfig = DEFAULT_OPPONENT_AI_CONFIG,
 ): OpponentAiState {
   const delta = pointWinner === 'player' ? config.adaptStep : -config.adaptStep;
-  return { skill: clamp(state.skill + delta, config.minSkill, config.maxSkill) };
+  return { ...state, skill: clamp(state.skill + delta, config.minSkill, config.maxSkill) };
+}
+
+/** A return requires the ball to be within the racket's lateral reach. */
+export function opponentCanReach(opponentX: number, ballX: number, reach: number): boolean {
+  return Math.abs(ballX - opponentX) <= reach;
+}
+
+/** Physical reach in the same court coordinates used to draw the opponent. */
+export interface OpponentContactGeometry {
+  readonly x: number;
+  readonly z: number;
+  readonly lateralReach: number;
+  readonly forwardReach: number;
+  readonly minimumHeight: number;
+  readonly maximumHeight: number;
+}
+
+export function canContactBall(
+  geometry: OpponentContactGeometry,
+  position: { readonly x: number; readonly y: number; readonly z: number },
+): boolean {
+  return Number.isFinite(position.x) && Number.isFinite(position.y) && Number.isFinite(position.z)
+    && Math.abs(position.x - geometry.x) <= geometry.lateralReach
+    && Math.abs(position.z - geometry.z) <= geometry.forwardReach
+    && position.y >= geometry.minimumHeight && position.y <= geometry.maximumHeight;
+}
+
+export interface OpponentMotionState {
+  readonly x: number;
+  readonly velocity: number;
+}
+
+/** Accelerate and brake toward a target without crossing it or the court boundary. */
+export function stepOpponentMotion(
+  state: OpponentMotionState,
+  target: number,
+  dt: number,
+  maxSpeed: number,
+  acceleration: number,
+  limit: number,
+): OpponentMotionState {
+  if (!(dt > 0) || !Number.isFinite(dt)) return state;
+  const destination = clamp(target, -limit, limit);
+  const delta = destination - state.x;
+  const stoppingSpeed = Math.sqrt(Math.max(0, 2 * acceleration * Math.abs(delta)));
+  const desired = Math.sign(delta) * Math.min(maxSpeed, stoppingSpeed);
+  const velocity = state.velocity + clamp(desired - state.velocity, -acceleration * dt, acceleration * dt);
+  const next = state.x + (state.velocity + velocity) * 0.5 * dt;
+  if ((destination - state.x) * (destination - next) <= 0 && Math.abs(delta) > 1e-9) {
+    return { x: destination, velocity: 0 };
+  }
+  if (Math.abs(delta) <= 1e-9 && Math.abs(velocity) < acceleration * dt) return { x: destination, velocity: 0 };
+  return { x: clamp(next, -limit, limit), velocity };
+}
+
+/** Pick a safe cross-court or open-court shot using only the last observed player position. */
+export function chooseOpponentTarget(
+  playerX: number,
+  contactX: number,
+  pressure01: number,
+  skill: number,
+  rng: () => number,
+): { readonly x: number; readonly z: number; readonly flightSeconds: number } {
+  const pressure = clamp01(pressure01);
+  const safe = clamp01(skill) * (1 - pressure);
+  const width = 1.1 + safe * 1.65;
+  const candidates = [-width, 0, width];
+  const scored = candidates.map((x) => ({
+    x,
+    score: Math.abs(x - playerX) * (0.55 + safe * 0.45) - Math.abs(x - contactX) * pressure * 0.25 + rng() * 0.2,
+  }));
+  scored.sort((a, b) => b.score - a.score);
+  return {
+    x: scored[0]!.x,
+    z: 4.4 + safe * 3,
+    flightSeconds: 1.38 - safe * 0.25 + pressure * 0.12,
+  };
+}
+
+/** Observe a completed shot, with a bounded session-only memory and no update for a central ball. */
+export function observePlayerPlacement(state: OpponentAiState, x: number): OpponentAiState {
+  if (!Number.isFinite(x) || Math.abs(x) < 0.4) return state;
+  const side: -1 | 1 = x < 0 ? -1 : 1;
+  return { ...state, placements: [...(state.placements ?? []), side].slice(-12) };
+}
+
+/** Recovery favours a recurring direction only after several observed placements. */
+export function opponentRecoveryX(state: OpponentAiState): number {
+  const placements = state.placements ?? [];
+  if (placements.length < 4) return 0;
+  const sum = placements.reduce<number>((total, value) => total + value, 0);
+  // Two neutral pseudo-observations keep short runs from causing extreme positioning.
+  return clamp((sum / (placements.length + 2)) * 0.9, -0.65, 0.65);
 }

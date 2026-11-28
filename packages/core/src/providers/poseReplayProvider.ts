@@ -10,6 +10,8 @@ export interface PoseRecordingSource {
   modelSha256?: string;
   delegate?: Delegate;
   runningMode?: 'VIDEO' | 'LIVE_STREAM';
+  /** Sampling rate used to collect the frames, when the harness knows it. */
+  samplingFps?: number;
   droppedFrameCount?: number;
   runtime?: { userAgent: string; platform: string };
   input?: {
@@ -61,6 +63,7 @@ function cloneSource(source: PoseRecordingSource): PoseRecordingSource {
     ...(source.modelSha256 !== undefined ? { modelSha256: source.modelSha256 } : {}),
     ...(source.delegate !== undefined ? { delegate: source.delegate } : {}),
     ...(source.runningMode !== undefined ? { runningMode: source.runningMode } : {}),
+    ...(source.samplingFps !== undefined ? { samplingFps: source.samplingFps } : {}),
     ...(source.droppedFrameCount !== undefined ? { droppedFrameCount: source.droppedFrameCount } : {}),
     ...(source.runtime !== undefined ? { runtime: { ...source.runtime } } : {}),
     ...(source.input !== undefined ? { input: { ...source.input } } : {}),
@@ -143,6 +146,9 @@ function validateSource(value: unknown): asserts value is PoseRecordingSource {
     if (value.runningMode !== 'VIDEO' && value.runningMode !== 'LIVE_STREAM') {
       throw new TypeError('MediaPipe replay source requires a VIDEO or LIVE_STREAM runningMode.');
     }
+  }
+  if (value.samplingFps !== undefined && (typeof value.samplingFps !== 'number' || !Number.isFinite(value.samplingFps) || value.samplingFps <= 0)) {
+    throw new RangeError('Replay source samplingFps must be a positive finite number.');
   }
   if (value.droppedFrameCount !== undefined && (!Number.isInteger(value.droppedFrameCount) || Number(value.droppedFrameCount) < 0)) {
     throw new RangeError('Replay source droppedFrameCount must be a non-negative integer.');

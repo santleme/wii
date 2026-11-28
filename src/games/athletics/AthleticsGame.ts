@@ -1,92 +1,86 @@
 import * as THREE from 'three';
-import type { SportActionEvent } from '../../cv/protocol';
 import type { ProceduralAudio } from '../audio';
 import { GameLoop } from '../core/GameLoop';
 import type { Feedback } from '../track/feedback';
-import { adjudicationDt, applySprint, applyStep, easeSpeed, type Gait, gaitFor, type Pace } from '../track/gait';
-import { RunGate } from '../track/runGate';
-import type { GameHudState } from '../track/TrackGame';
 import { createMiiRunner, type MiiRunner } from './miiRunner';
-import { formatTime, type Goal, MAX_SPEED_MPS, parseRecords, placeAmong, Race, recordTime, type Split } from './race';
+import { formatTime, type Goal, NO_BODY_ADVICE, parseRecords, Race, recordTime, type Split, TOP_SPEED } from './race';
 import { buildStadium, type Stadium } from './stadiumScene';
 import { LANE_WIDTH, R_RUN, sampleTrack, type TrackSample } from './trackCurve';
 
-export interface AthleticsHudState extends GameHudState {
-  finish?: { title: string; detail: string };
+export interface AthleticsHudState {
+  score: number;
+  label: string;
+  speed01: number;
+  status: string;
+  banner?: { title: string; detail?: string };
+  feedback?: Feedback;
+  finished?: { title: string; detail: string; standings: { name: string; time: string; you: boolean; status: 'confirmed' | 'estimated'; place: number }[]; standingsFinal: boolean; restart01: number };
+  energy?: { value01: number; label: string; coaching?: string };
+  /** Where everyone is in the race, 0–1. */
+  runners?: { name: string; progress01: number; you: boolean }[];
+  /** The camera picture should be shown large. */
+  framing?: boolean;
 }
 
 const INTRO_S = 2.2;
-const KEY_PACE_STEP = 0.2;
 const CHASE_RATE = 6;
-const GAIT_STATUS: Record<Gait, string> = { idle: 'Parado', walk: 'Andando', run: 'Correndo' };
 const RECORDS_KEY = 'wii-athletics-records';
-/** Pacers in lanes 2 and 3; shorter races are run faster. */
-const RIVALS = [
-  { lane: 1, shirt: 0xe8604c, speed01: 0.84 },
-  { lane: 2, shirt: 0x4fbf58, speed01: 0.72 },
-];
-const GOAL_PACE: Record<Goal, number> = { 100: 1.08, 400: 1, 800: 0.92 };
+/** The player runs in lane 1; the rivals, in this order, in lanes 2 to 4. */
+const RIVAL_SHIRTS = [0xe8604c, 0x4fbf58, 0xf5b52e];
+/** Arms and legs keep moving during the warm-up, so the player sees the Mii copy them on the spot. */
+const WARMUP_STRIDE_SPEED = 7;
 
 /** What it takes to draw one athlete; the player and the rivals share it. */
 interface Athlete {
   mii: MiiRunner;
   lane: number;
-  speed01: number;
   stridePhase: number;
   lean: number;
 }
-interface Rival extends Athlete {
-  target: number;
-  race: Race;
-}
 
-const strideStep = (dt: number, speed01: number, cadenceSpm = 0) =>
-  (dt * Math.PI * (cadenceSpm || 70 + speed01 * 130)) / 60;
+const strideStep = (dt: number, speedMps: number) => (dt * Math.PI * (1.4 + speedMps * 0.28));
 
+/**
+ * The athletics race: the Athletics HD stadium, Mii and chase camera, driven only by how hard the
+ * player runs in front of the camera (`setEffort`). Rules live in `Race`; this class draws them.
+ */
 export class AthleticsGame {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(54, 1, 0.1, 350);
-  private readonly player: Athlete = { mii: createMiiRunner(), lane: 0, speed01: 0, stridePhase: 0, lean: 0 };
-  private readonly rivals: Rival[];
+  private readonly player: Athlete = { mii: createMiiRunner(0x2f9be8), lane: 0, stridePhase: 0, lean: 0 };
+  private readonly rivals: Athlete[];
   private readonly loop: GameLoop;
   private readonly stadium: Stadium;
   private readonly hudTimer: number;
-  private readonly gate = new RunGate();
   private readonly race: Race;
   private readonly intro: THREE.CatmullRomCurve3;
   private readonly lookTarget = new THREE.Vector3();
   private readonly chasePosition = new THREE.Vector3();
   private readonly chaseTarget = new THREE.Vector3();
   private introTime = 0;
-  private pace: Pace = { owner: 'camera', speed01: 0, cadenceSpm: 0 };
-  private gait: Gait = 'idle';
-  /** Wall time of the last camera pace reading; older than the gait's limit and the race holds still. */
-  private lastSprintInputAtMs?: number;
-  private outcome?: { place: number; best: number; isNew: boolean };
+  private rivalSpeeds: number[];
+  private record?: { best: number; isNew: boolean };
   private feedback?: Feedback;
+  private cue = '';
   private lastHud = '';
 
   constructor(
     canvas: HTMLCanvasElement,
     private readonly onHud: (state: AthleticsHudState) => void,
     private readonly audio?: ProceduralAudio,
-    goalMeters: Goal = 400,
+    goal: Goal = 100,
   ) {
-    this.race = new Race(goalMeters);
-    this.loop = new GameLoop(canvas, this.scene, this.camera, (dt, _simulationTimeMs, wallTimeMs) =>
-      this.update(dt, wallTimeMs),
-    );
+    this.race = new Race(goal, Math.random);
+    this.loop = new GameLoop(canvas, this.scene, this.camera, (dt, _simulationTimeMs, wallTimeMs) => this.update(dt, wallTimeMs));
     this.stadium = buildStadium(this.scene, this.loop.renderer);
     this.loop.onQualityChange = (tier) => this.stadium.setShadows(tier === 0);
-    this.rivals = RIVALS.map(({ lane, shirt, speed01 }) => ({
-      mii: createMiiRunner(shirt),
-      lane,
-      speed01: 0,
-      stridePhase: lane,
-      lean: 0,
-      target: speed01 * GOAL_PACE[goalMeters],
-      race: new Race(goalMeters),
-    }));
+    this.rivals = RIVAL_SHIRTS.map((shirt, i) => ({ mii: createMiiRunner(shirt), lane: i + 1, stridePhase: i, lean: 0 }));
+    this.rivalSpeeds = this.rivals.map(() => 0);
+    // Points at the player's own runner.
+    const marker = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.28, 4), new THREE.MeshBasicMaterial({ color: 0xff8a2a }));
+    marker.rotation.x = Math.PI;
+    marker.position.y = 1.85;
+    this.player.mii.root.add(marker);
     this.scene.add(this.player.mii.root, ...this.rivals.map((rival) => rival.mii.root));
     this.drawAll(0);
     const end = this.chasePosition.clone();
@@ -97,68 +91,71 @@ export class AthleticsGame {
       end,
     ]);
     this.camera.position.copy(this.intro.getPoint(0));
-    this.lookTarget.set(0, 0, 0);
     this.camera.lookAt(this.lookTarget);
     this.stadium.follow(this.player.mii.root.position, this.camera.position);
     this.hudTimer = window.setInterval(() => this.publishHud(), 80);
-  }
-
-  setTracking(tracking: string): void {
-    this.gate.setTracking(tracking);
     this.publishHud();
   }
 
-  onAction(event: SportActionEvent): void {
-    if (event.type === 'step') this.pace = applyStep(this.pace);
-    if (event.type === 'sprint') {
-      this.pace = applySprint(this.pace, event);
-      this.lastSprintInputAtMs = event.timestampMs;
-    }
-  }
+  onAction(): void {}
 
-  onKey(key: string): void {
-    const pressed = key.toLowerCase();
-    const faster = pressed === 'arrowup' || pressed === 'w' || pressed === ' ';
-    if (!faster && pressed !== 'arrowdown' && pressed !== 's') return;
-    if (this.race.finished || this.gate.resumeByKey()) return;
-    const speed01 = THREE.MathUtils.clamp(this.pace.speed01 + (faster ? KEY_PACE_STEP : -KEY_PACE_STEP), 0, 1);
-    this.pace = { owner: 'keyboard', speed01: Math.round(speed01 * 10) / 10, cadenceSpm: 0 };
+  /** Played with the body only. */
+  onKey(): void {}
+
+  setEffort(effort: number, sampleAtMs?: number | null): void { this.race.setEffort(effort, sampleAtMs); }
+
+  setFraming(advice: string | undefined, handsHidden?: boolean): void { this.race.setFraming(advice, handsHidden); }
+
+  setHandsRaised(raised: boolean, atMs: number | null): void { this.race.setHandsRaised(raised, atMs); }
+
+  setTracking(tracking: string): void {
+    // A player the camera lost stops pushing; momentum fades on its own.
+    if (tracking !== 'SEM POSE') return;
+    this.race.setHandsRaised(false, null);
+    if (this.race.advice !== null) this.race.setFraming(NO_BODY_ADVICE);
   }
 
   /**
    * Places and animates one athlete. Distance is offset by the goal, so every lane finishes on the
    * painted line and outer lanes get the staggered start of a real track.
    */
-  private draw(athlete: Athlete, distance: number, dt: number): TrackSample {
+  private draw(athlete: Athlete, distance: number, speedMps: number, dt: number): TrackSample {
     const at = sampleTrack(distance - this.race.goal, athlete.lane);
     const { root } = athlete.mii;
     root.position.set(at.x, 0, at.z);
     root.rotation.y = Math.atan2(-at.tangentX, -at.tangentZ);
-    const speed = athlete.speed01 * MAX_SPEED_MPS;
     const radius = R_RUN + athlete.lane * LANE_WIDTH;
-    const lean = Math.abs(at.tangentZ) > 1e-3 ? Math.atan((speed * speed) / (9.81 * radius)) : 0;
+    const lean = Math.abs(at.tangentZ) > 1e-3 ? Math.atan((speedMps * speedMps) / (9.81 * radius)) : 0;
     athlete.lean = THREE.MathUtils.damp(athlete.lean, lean, 6, dt);
-    athlete.mii.animate(athlete.stridePhase, athlete.speed01, athlete.lean);
+    athlete.mii.animate(athlete.stridePhase, Math.min(1, speedMps / TOP_SPEED), athlete.lean);
     return at;
   }
 
-  /** Draws everyone and refreshes where the chase camera wants to be. */
   private drawAll(dt: number): void {
-    for (const rival of this.rivals) this.draw(rival, rival.race.distance, dt);
-    const at = this.draw(this.player, this.race.distance, dt);
+    const { race } = this;
+    race.rivals.forEach((rival, i) => { this.draw(this.rivals[i]!, rival.distance, this.rivalSpeeds[i]!, dt); });
+    // While warming up the Mii runs on the spot, at the speed the player shows.
+    const shown = race.phase === 'warmup' ? race.effort01 * WARMUP_STRIDE_SPEED : race.speed;
+    const at = this.draw(this.player, race.distance, shown, dt);
     this.chasePosition.set(at.x - at.tangentX * 6, 3.2, at.z - at.tangentZ * 6);
     this.chaseTarget.set(at.x + at.tangentX * 5, 1.1, at.z + at.tangentZ * 5);
   }
 
   private update(dt: number, wallTimeMs: number): void {
-    const introDone = this.introTime >= INTRO_S;
-    if (!introDone) this.introTime = Math.min(INTRO_S, this.introTime + dt);
-    else this.gate.advance(dt);
-    // A pause or a silent camera freezes the whole race, rivals included, so nobody gains on a
-    // stale reading; after the finish line the limbs ease to rest.
-    const inputAgeMs = this.lastSprintInputAtMs === undefined ? 0 : Math.max(0, wallTimeMs - this.lastSprintInputAtMs);
-    const raceDt = adjudicationDt(this.pace, dt, inputAgeMs);
-    if (this.gate.phase === 'running' && raceDt > 0) this.step(raceDt);
+    const { race } = this;
+    if (this.introTime < INTRO_S) this.introTime = Math.min(INTRO_S, this.introTime + dt);
+    // The countdown waits for the opening shot; framing and warm-up can run under it.
+    if (this.introTime >= INTRO_S || race.phase === 'framing' || race.phase === 'warmup') {
+      const before = race.rivals.map((rival) => rival.distance);
+      const splits = race.splits.length;
+      race.step(dt, wallTimeMs);
+      this.rivalSpeeds = race.rivals.map((rival, i) => (rival.distance - before[i]!) / Math.max(dt, 1e-6));
+      for (const split of race.splits.slice(splits)) this.announce(split);
+    }
+    const shown = race.phase === 'warmup' ? race.effort01 * WARMUP_STRIDE_SPEED : race.speed;
+    if (shown > 0.2) this.player.stridePhase += strideStep(dt, shown);
+    this.rivals.forEach((rival, i) => { if (this.rivalSpeeds[i]! > 0.2) rival.stridePhase += strideStep(dt, this.rivalSpeeds[i]!); });
+    this.playCues();
     this.drawAll(dt);
 
     if (this.introTime < INTRO_S) {
@@ -174,78 +171,74 @@ export class AthleticsGame {
     this.stadium.follow(this.player.mii.root.position, this.camera.position);
   }
 
-  private step(dt: number): void {
-    // Rivals move first, so one that crosses on the same step as the player is already counted.
-    for (const rival of this.rivals) {
-      const surge = 1 + 0.03 * Math.sin(rival.race.seconds * 0.7 + rival.lane * 2);
-      rival.speed01 = easeSpeed(rival.speed01, rival.race.finished ? 0 : rival.target * surge, dt);
-      if (rival.speed01 > 0) rival.stridePhase += strideStep(dt, rival.speed01);
-      rival.race.advance(dt, rival.speed01);
-    }
-    const { player } = this;
-    player.speed01 = easeSpeed(player.speed01, this.race.finished ? 0 : this.pace.speed01, dt);
-    this.gait = gaitFor(player.speed01, this.gait);
-    if (this.gait !== 'idle') player.stridePhase += strideStep(dt, player.speed01, this.pace.cadenceSpm);
-    const split = this.race.advance(dt, player.speed01);
-    if (split) this.announce(split);
-  }
-
-  /** The record lives in this browser only; blocked storage just means it is not remembered. */
-  private finishRace(): void {
-    let records = {};
-    try {
-      records = parseRecords(localStorage.getItem(RECORDS_KEY));
-    } catch {}
-    const result = recordTime(records, this.race.goal, this.race.seconds);
-    try {
-      localStorage.setItem(RECORDS_KEY, JSON.stringify(result.records));
-    } catch {}
-    const rivals = this.rivals.map((rival) => rival.race);
-    this.outcome = { place: placeAmong(this.race.seconds, rivals), best: result.best, isNew: result.isNew };
+  /** A beep per countdown number, then the start and a win. */
+  private playCues(): void {
+    const { race } = this;
+    const cue = race.phase === 'countdown' ? `count-${Math.ceil(race.countdown)}` : race.phase;
+    if (cue === this.cue) return;
+    this.cue = cue;
+    if (race.phase === 'countdown') this.audio?.bounce(1);
+    if (race.phase === 'racing' || (race.phase === 'finished' && race.place === 1)) this.audio?.success(1);
   }
 
   private announce(split: Split): void {
-    if (this.race.finished) {
-      this.finishRace();
-      this.audio?.success();
-    } else this.audio?.milestone();
-    this.feedback = {
-      id: (this.feedback?.id ?? 0) + 1,
-      kind: 'clear',
-      text: `${split.meters} m · ${formatTime(split.seconds)}`,
-    };
+    if (split.metres === this.race.goal) this.saveRecord();
+    else this.audio?.milestone();
+    this.feedback = { id: (this.feedback?.id ?? 0) + 1, kind: 'clear', text: `${split.metres} m · ${formatTime(split.seconds)}` };
     this.publishHud();
   }
 
+  /** The record lives in this browser only; blocked storage just means it is not remembered. */
+  private saveRecord(): void {
+    let records = {};
+    try { records = parseRecords(localStorage.getItem(RECORDS_KEY)); } catch {}
+    const result = recordTime(records, this.race.goal, this.race.finishS!);
+    try { localStorage.setItem(RECORDS_KEY, JSON.stringify(result.records)); } catch {}
+    this.record = { best: result.best, isNew: result.isNew };
+  }
+
   private publishHud(): void {
-    const { race, gate } = this;
-    const meters = Math.floor(race.distance);
-    const label = formatTime(race.seconds);
-    const speed01 = Math.round(this.player.speed01 * 100) / 100;
-    const waiting = this.introTime < INTRO_S || race.finished;
-    const banner = waiting
+    const { race } = this;
+    const metres = Math.min(race.goal, Math.floor(race.distance));
+    const banner = this.introTime < INTRO_S && race.phase !== 'framing' && race.phase !== 'warmup'
       ? undefined
-      : gate.phase === 'countdown'
-        ? { title: String(gate.count) }
-        : gate.phase === 'paused'
-          ? {
-              title: 'PAUSADO',
-              detail: 'Tracking perdido · volte ao quadro ou aperte uma tecla para seguir no teclado',
-            }
-          : undefined;
-    const { outcome } = this;
-    const record = outcome?.isNew ? 'Novo recorde pessoal!' : `Recorde pessoal: ${formatTime(outcome?.best ?? 0)}`;
-    const finish = outcome
+      : race.phase === 'framing'
+        ? race.advice === undefined
+          ? { title: 'Ótimo!', detail: 'Fique aí' }
+          : { title: 'Ajuste a câmera', detail: race.advice ?? 'Ligue a câmera para correr' }
+        : race.phase === 'warmup'
+          ? { title: 'CORRA COM TUDO!', detail: `${race.retries ? 'Não senti você correr. De novo' : 'Aquecimento: mantenha o ritmo até o fim'} · ${Math.ceil(race.warmupLeft)}` }
+          : race.phase === 'countdown' ? { title: String(Math.ceil(race.countdown)), detail: 'Pare. Corra quando zerar' } : undefined;
+    const record = this.record?.isNew ? 'Novo recorde pessoal!' : this.record ? `Recorde pessoal: ${formatTime(this.record.best)}` : '';
+    const finished = race.finishS !== undefined
       ? {
-          title: `${outcome.place}º lugar · ${label}`,
-          detail: [record, ...race.splits.map((s) => `${s.meters} m ${formatTime(s.seconds)}`)].join(' · '),
-        }
+        title: !race.standingsFinal ? 'PROVA EM ANDAMENTO' : race.place === 1 ? 'VOCÊ VENCEU!' : `${race.place}º lugar`,
+        detail: [`${formatTime(race.finishS)} nos ${race.goal} m`, record].filter(Boolean).join(' · '),
+        standings: race.standings.map((runner) => ({ name: runner.name, time: formatTime(runner.timeS), you: runner.you, status: runner.status, place: runner.place })),
+        standingsFinal: race.standingsFinal,
+        restart01: Math.floor(race.restart01 * 20) / 20,
+      }
       : undefined;
-    const status = `${meters} / ${race.goal} m · ${GAIT_STATUS[this.gait]}`;
-    const key = `${label}-${speed01}-${status}-${this.feedback?.id}-${banner?.title}-${finish?.title}`;
+    const state: AthleticsHudState = {
+      score: metres,
+      label: formatTime(race.elapsedS),
+      speed01: Math.round(race.effort01 * 100) / 100,
+      // Coarse steps, so a steady run does not republish the HUD every tick.
+      energy: finished ? undefined : { value01: Math.round(race.energy01 * 20) / 20, label: race.phase === 'warmup' || race.phase === 'framing' ? 'SINAL DA CORRIDA' : 'SUA ENERGIA', coaching: race.coaching },
+      runners: race.phase === 'racing' ? [
+        { name: 'Você', progress01: metres / race.goal, you: true },
+        ...race.rivals.map((rival) => ({ name: rival.name, progress01: Math.min(1, Math.floor(rival.distance) / race.goal), you: false })),
+      ] : undefined,
+      status: race.phase === 'racing' ? `${race.place}º lugar · ${metres} / ${race.goal} m` : race.phase === 'finished' ? 'Chegada!' : 'Corra no lugar, mexendo os braços',
+      banner,
+      feedback: this.feedback,
+      finished,
+      framing: race.phase === 'framing' || race.phase === 'warmup',
+    };
+    const key = JSON.stringify(state);
     if (key === this.lastHud) return;
     this.lastHud = key;
-    this.onHud({ score: meters, label, speed01, status, feedback: this.feedback, banner, finish });
+    this.onHud(state);
   }
 
   dispose(): void {

@@ -1,7 +1,6 @@
 import { type RefObject, useEffect, useState } from 'react';
 
 interface Props {
-  hidden?: boolean;
   videoRef: RefObject<HTMLVideoElement | null>;
   canvasRef: RefObject<HTMLCanvasElement | null>;
   cameraOn: boolean;
@@ -18,9 +17,7 @@ export function CameraPip(props: Props) {
   }, [props.cameraOn]);
 
   return <aside
-    className={props.hidden ? 'cam-pip is-hidden' : expanded ? 'cam-pip expanded' : 'cam-pip'}
-    aria-hidden={props.hidden || undefined}
-    inert={props.hidden || undefined}
+    className={expanded ? 'cam-pip expanded' : 'cam-pip'}
   >
     <div className="cam-feed">
       <video ref={props.videoRef} autoPlay muted playsInline />

@@ -37,6 +37,12 @@ describe('pose recording and replay', () => {
     expect(decoded.frames[2]!.snapshot.landmarks).toEqual([]);
   });
 
+  it('preserves a declared sampling rate and rejects invalid ones', () => {
+    const recording = createPoseRecording([pose(0)], { kind: 'synthetic', samplingFps: 15 });
+    expect(parsePoseRecording(serializePoseRecording(recording)).source.samplingFps).toBe(15);
+    expect(() => createPoseRecording([pose(0)], { kind: 'synthetic', samplingFps: 0 })).toThrow(/samplingFps/);
+  });
+
   it('migrates legacy version 1 recordings using the trusted input geometry', () => {
     const recording = createPoseRecording([pose(10), pose(43)], {
       kind: 'mediapipe',

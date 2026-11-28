@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { addRoomEnvironment } from '../core/environment';
-import { createSkyDome } from '../track/scenery';
+import { createSkyDome } from '../core/scenery';
 import { merge, paint } from './geometry';
 import { LANE_WIDTH, lapLength, R_KERB, R_RUN, STRAIGHT, sampleTrack } from './trackCurve';
 

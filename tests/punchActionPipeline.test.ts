@@ -45,6 +45,15 @@ describe('punch wiring in ActionPipeline', () => {
     expect(punch.id).toBeGreaterThan(start!.id);
   });
 
+  it('attaches trajectory measurement and geometry classification to confirmed punches', () => {
+    const punch = jab(new ActionPipeline()).find((event) => event.type === 'punch');
+    if (punch?.type !== 'punch') throw new Error('missing punch');
+    expect(punch.punchKind).toBe('straight');
+    expect(punch.punchTargetZone).toBe('head');
+    expect(punch.measurement?.samples.length).toBeGreaterThanOrEqual(2);
+    expect(punch.measurement?.forwardTravel).toBeGreaterThan(0.2);
+  });
+
   it('stays silent until the calibration scale has converged', () => {
     const profile = { ...calibration(), readiness: { scale01: 0.2, neutral01: 1 } };
     expect(jab(new ActionPipeline(), profile)).toEqual([]);
@@ -57,7 +66,7 @@ describe('punch wiring in ActionPipeline', () => {
   it('forgets the previous session on reset', () => {
     const pipeline = new ActionPipeline();
     jab(pipeline);
-    pipeline.reset();
+    pipeline.reset(933);
     expect(jab(pipeline).map((event) => event.type)).toEqual(['punch-start', 'punch']);
   });
 
