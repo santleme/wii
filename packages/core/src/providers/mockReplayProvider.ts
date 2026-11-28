@@ -33,10 +33,16 @@ export class MockReplayProvider {
     return this.cursor >= this.frames.length;
   }
 
+  /** Frames consumed so far; mirrors PoseReplayProvider.frameIndex. */
+  get frameIndex(): number {
+    return this.cursor;
+  }
+
   next(): HandSnapshot | undefined {
     const frame = this.frames[this.cursor];
+    if (!frame) return undefined;
     this.cursor += 1;
-    return frame ? cloneSnapshot(frame) : undefined;
+    return cloneSnapshot(frame);
   }
 
   reset(): void {

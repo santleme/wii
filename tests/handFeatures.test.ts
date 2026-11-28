@@ -145,6 +145,17 @@ describe('mock replay provider', () => {
     expect(replay.next()?.hands[0]?.worldLandmarks[0]?.x).toBe(0);
   });
 
+  it('does not advance the cursor past the end, like PoseReplayProvider', () => {
+    const replay = new MockReplayProvider([handSnapshot(0), handSnapshot(33)]);
+    replay.next();
+    replay.next();
+    expect(replay.frameIndex).toBe(2);
+    expect(replay.next()).toBeUndefined();
+    expect(replay.next()).toBeUndefined();
+    expect(replay.frameIndex).toBe(2);
+    expect(replay.isComplete).toBe(true);
+  });
+
   it('requires a strictly increasing replay timeline', () => {
     expect(() => new MockReplayProvider([handSnapshot(10), handSnapshot(10)])).toThrow(/strictly increasing/);
   });
