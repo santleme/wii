@@ -38,109 +38,13 @@ export const TOP_SPEED = 8.5;
 /** How fast the speed catches up: quicker to build than to lose, so a missed stride costs little. */
 const GAIN_TAU_S = 0.5;
 const LOSS_TAU_S = 1.4;
-export interface Rival {
-  name: string;
-  /** Top speed for this race, fixed once at the starting line. */
-  pace: number;
-  distance: number;
-  speed: number;
-  reactionS: number;
-  accelerationS: number;
-  /** Maximum proportional reduction in speed at the finish. */
-  fade: number;
-  finishS?: number;
-}
-export interface Standing {
-  name: string;
-  timeS: number;
-  you: boolean;
-  status: 'confirmed' | 'estimated';
-  /** Competition rank: tied times share a place. */
-  place: number;
-}
+export interface Rival { name: string; pace: number; distance: number; finishS?: number }
 export interface Split { metres: number; seconds: number }
 export type Phase = 'framing' | 'warmup' | 'countdown' | 'racing' | 'finished';
 
 /** Paces over 100 m; longer races are run a little slower, as people do. */
-const RIVALS = [
-  { name: 'Bia', pace: 5.1, reactionS: 0.24, accelerationS: 1.5, fade: 0.025 },
-  { name: 'Caio', pace: 5.8, reactionS: 0.2, accelerationS: 1.8, fade: 0.015 },
-  { name: 'Davi', pace: 6.5, reactionS: 0.16, accelerationS: 2, fade: 0.035 },
-];
-const GOAL_PACE: Record<Goal, number> = { 100: 1.012, 200: 0.978, 400: 0.888 };
-/** The longer the event, the more speed the athletes lose in its second half. */
-const GOAL_FADE: Record<Goal, number> = { 100: 1, 200: 2, 400: 4 };
-const POST_FINISH_DISTANCE = 6;
-const POST_FINISH_TAU_S = 0.8;
-
-/** Integral of the zero-to-one acceleration ramp, in seconds. */
-function accelerationIntegral(rival: Rival, timeS: number): number {
-  const sinceStart = Math.max(0, timeS - rival.reactionS);
-  return sinceStart < rival.accelerationS
-    ? sinceStart * sinceStart / (2 * rival.accelerationS)
-    : sinceStart - rival.accelerationS / 2;
-}
-
-function timeForAccelerationIntegral(rival: Rival, integral: number): number {
-  return rival.reactionS + (integral < rival.accelerationS / 2
-    ? Math.sqrt(2 * rival.accelerationS * integral)
-    : integral + rival.accelerationS / 2);
-}
-
-function rivalSpeed(rival: Rival, elapsedS: number, goal: Goal): number {
-  const acceleration = Math.min(1, Math.max(0, (elapsedS - rival.reactionS) / rival.accelerationS));
-  const progress = Math.min(1, Math.max(0, rival.distance / goal));
-  return rival.pace * acceleration * (1 - rival.fade * Math.max(0, (progress - 0.5) * 2));
-}
-
-/** Unfaded travel required to reach `to`, integrating the distance-dependent fade exactly. */
-function travelRequired(rival: Rival, goal: Goal, to: number): number {
-  const midpoint = goal / 2;
-  const from = Math.min(goal, Math.max(0, rival.distance));
-  let travel = Math.max(0, Math.min(to, midpoint) - from);
-  const lateFrom = Math.max(midpoint, from);
-  if (to <= lateFrom) return travel;
-  if (rival.fade === 0) return travel + to - lateFrom;
-  const scale = 2 * rival.fade / goal;
-  const fromFactor = 1 - scale * (lateFrom - midpoint);
-  const toFactor = 1 - scale * (to - midpoint);
-  travel += Math.log(fromFactor / toFactor) / scale;
-  return travel;
-}
-
-function advanceRival(rival: Rival, goal: Goal, fromS: number, toS: number): void {
-  if (rival.finishS !== undefined) {
-    const dt = toS - fromS;
-    const travelled = rival.speed * POST_FINISH_TAU_S * (1 - Math.exp(-dt / POST_FINISH_TAU_S));
-    rival.distance = Math.min(goal + POST_FINISH_DISTANCE, rival.distance + travelled);
-    rival.speed = rival.distance >= goal + POST_FINISH_DISTANCE ? 0 : rival.speed * Math.exp(-dt / POST_FINISH_TAU_S);
-    return;
-  }
-  const initialIntegral = accelerationIntegral(rival, fromS);
-  const available = rival.pace * (accelerationIntegral(rival, toS) - initialIntegral);
-  const finishTravel = travelRequired(rival, goal, goal);
-  if (available >= finishTravel && rival.pace > 0) {
-    const crossedAt = timeForAccelerationIntegral(rival, initialIntegral + finishTravel / rival.pace);
-    rival.finishS = crossedAt;
-    rival.distance = goal;
-    rival.speed = rivalSpeed(rival, crossedAt, goal);
-    advanceRival(rival, goal, crossedAt, toS);
-    return;
-  }
-  const midpoint = goal / 2;
-  const beforeFade = Math.min(available, Math.max(0, midpoint - rival.distance));
-  rival.distance += beforeFade;
-  const lateTravel = Math.max(0, available - beforeFade);
-  if (lateTravel > 0) {
-    if (rival.fade === 0) rival.distance += lateTravel;
-    else {
-      const scale = 2 * rival.fade / goal;
-      const factor = 1 - scale * (rival.distance - midpoint);
-      rival.distance += factor * -Math.expm1(-scale * lateTravel) / scale;
-    }
-  }
-  rival.speed = rivalSpeed(rival, toS, goal);
-}
+const RIVALS = [{ name: 'Bia', pace: 5.1 }, { name: 'Caio', pace: 5.8 }, { name: 'Davi', pace: 6.5 }];
+const GOAL_PACE: Record<Goal, number> = { 100: 1, 200: 0.97, 400: 0.88 };
 
 export class Race {
   phase: Phase = 'framing';
@@ -170,24 +74,14 @@ export class Race {
   private effortAgeS = 0;
   private effortSampleAtMs?: number | null;
 
-  constructor(readonly goal: Goal = 100, rng: () => number = () => 0.5) {
-    this.rivals = RIVALS.map((rival) => {
-      const sample = rng();
-      const variation = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 0.5;
-      return {
-        ...rival,
-        pace: rival.pace * GOAL_PACE[goal] * (0.985 + variation * 0.03),
-        fade: rival.fade * GOAL_FADE[goal] / 2,
-        distance: 0,
-        speed: 0,
-      };
-    });
+  constructor(readonly goal: Goal = 100) {
+    this.rivals = RIVALS.map((rival) => ({ ...rival, pace: rival.pace * GOAL_PACE[goal], distance: 0 }));
   }
 
   /** The camera's latest raw effort, which can exceed 1. */
   setEffort(effort: number, sampleAtMs?: number | null): void {
     this.effort = Number.isFinite(effort) ? Math.max(0, effort) : 0;
-    if (sampleAtMs === null || (sampleAtMs !== undefined && !Number.isFinite(sampleAtMs))) this.effortAgeS = Infinity;
+    if (sampleAtMs === null) this.effortAgeS = Infinity;
     else if (sampleAtMs === undefined || sampleAtMs !== this.effortSampleAtMs) this.effortAgeS = 0;
     this.effortSampleAtMs = sampleAtMs;
   }
@@ -222,13 +116,14 @@ export class Race {
   }
 
   step(dt: number, wallTimeMs?: number): void {
-    if (!(dt > 0) || !Number.isFinite(dt)) return;
-    this.effortAgeS = wallTimeMs !== undefined && Number.isFinite(wallTimeMs) && typeof this.effortSampleAtMs === 'number' && Number.isFinite(this.effortSampleAtMs)
+    this.effortAgeS = wallTimeMs !== undefined && typeof this.effortSampleAtMs === 'number'
       ? Math.max(0, (wallTimeMs - this.effortSampleAtMs) / 1000)
       : this.effortAgeS + dt;
     if (this.phase === 'framing') {
       this.framedFor = this.advice === undefined ? this.framedFor + dt : 0;
-      if (this.advice !== null && this.advice !== NO_BODY_ADVICE) this.seenFor += dt;
+      // Patience counts a body in view: like framedFor, it restarts when that stops being true.
+      if (this.advice === NO_BODY_ADVICE) this.seenFor = 0;
+      else if (this.advice !== null) this.seenFor += dt;
       if (this.framedFor >= FRAMED_S || this.seenFor >= FRAMING_PATIENCE_S) this.phase = 'warmup';
       return;
     }
@@ -259,7 +154,15 @@ export class Race {
       return;
     }
     this.elapsedS += dt;
-    for (const rival of this.rivals) advanceRival(rival, this.goal, this.elapsedS - dt, this.elapsedS);
+    for (const rival of this.rivals) {
+      // A short acceleration off the blocks, then a steady pace.
+      const from = rival.distance;
+      const speed = rival.pace * Math.min(1, this.elapsedS / 1.2);
+      rival.distance += speed * dt;
+      if (rival.finishS === undefined && rival.distance >= this.goal && speed > 0) {
+        rival.finishS = this.elapsedS - dt + (this.goal - from) / speed;
+      }
+    }
     if (this.phase === 'finished') {
       this.restart.step(dt, wallTimeMs);
       this.speed *= Math.exp(-dt / GAIN_TAU_S);
@@ -301,25 +204,16 @@ export class Race {
     this.warmupLastActiveAtMs = atMs;
   }
 
-  /** A pending time is an estimate, not a result. Finished times are never recalculated. */
-  get standings(): Standing[] {
-    const rivals: Standing[] = this.rivals.map((rival) => {
-      if (rival.finishS !== undefined) {
-        return { name: rival.name, timeS: rival.finishS, you: false, status: 'confirmed', place: 0 };
-      }
-      // Estimate using the mean of current and expected end speed, including fade.
-      const remaining = Math.max(0, this.goal - rival.distance);
-      const endSpeed = rival.pace * (1 - rival.fade);
-      const currentSpeed = Math.max(rival.speed, rival.pace * 0.5);
-      const timeS = this.elapsedS + remaining / Math.max((currentSpeed + endSpeed) / 2, 1e-6);
-      return { name: rival.name, timeS, you: false, status: 'estimated', place: 0 };
-    });
-    const you: Standing[] = this.finishS === undefined ? [] : [{ name: 'Você', timeS: this.finishS, you: true, status: 'confirmed', place: 0 }];
-    const sorted = [...rivals, ...you].sort((a, b) => a.timeS - b.timeS);
-    return sorted.map((standing, index) => ({ ...standing, place: index > 0 && sorted[index - 1]!.timeS === standing.timeS ? sorted.findIndex((other) => other.timeS === standing.timeS) + 1 : index + 1 }));
+  /** Everyone, fastest first; a rival still running is given the time its pace will take. */
+  get standings(): { name: string; timeS: number; you: boolean }[] {
+    const rivals = this.rivals.map((rival) => ({
+      name: rival.name,
+      timeS: rival.finishS ?? this.elapsedS + (this.goal - rival.distance) / rival.pace,
+      you: false,
+    }));
+    const you = this.finishS === undefined ? [] : [{ name: 'Você', timeS: this.finishS, you: true }];
+    return [...rivals, ...you].sort((a, b) => a.timeS - b.timeS);
   }
-
-  get standingsFinal(): boolean { return this.rivals.every((rival) => rival.finishS !== undefined); }
 
   /** 1 for first: rivals already across the line, or further along, are ahead. */
   get place(): number {

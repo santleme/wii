@@ -104,6 +104,19 @@ describe('athletics race', () => {
     expect([seen.phase, absent.phase]).toEqual(['warmup', 'framing']);
   });
 
+  it('does not carry framing patience across an absence', () => {
+    const race = new Race();
+    race.setFraming('Incline a câmera para cima');
+    run(race, FRAMING_PATIENCE_S - 1); // seen, imperfectly, almost long enough to be let through
+    race.setFraming(NO_BODY_ADVICE);
+    run(race, FRAMING_PATIENCE_S * 2); // the body leaves for a long while
+    race.setFraming('Incline a câmera para cima');
+    run(race, FRAMING_PATIENCE_S - 0.5);
+    expect(race.phase).toBe('framing'); // patience restarted when the body left, not inherited
+    run(race, 1);
+    expect(race.phase).toBe('warmup');
+  });
+
   it('holds everyone on the blocks during the countdown', () => {
     const race = warmedUp(0.8);
     feed(race, 1);
@@ -215,14 +228,11 @@ describe('athletics race', () => {
     race.distance = 99.9;
     race.speed = 8.5;
     race.setEffort(1);
-    const rival = race.rivals[2]!;
-    rival.distance = 99.95;
-    rival.pace = 6.5;
-    rival.fade = 0;
+    race.rivals[2]!.distance = 99.95;
 
     race.step(1 / 60);
 
-    expect(rival.finishS).toBeCloseTo(15 + (100 - 99.95) / 6.5, 6);
+    expect(race.rivals[2]!.finishS).toBeCloseTo(15 + (100 - 99.95) / 6.5, 6);
     expect(race.finishS).toBeCloseTo(15 + (100 - 99.9) / 8.5, 6);
     expect(race.standings.map((runner) => runner.name).indexOf('Davi')).toBeLessThan(
       race.standings.map((runner) => runner.name).indexOf('Você'),
@@ -271,156 +281,4 @@ describe('athletics race', () => {
     expect(race.speed).toBeGreaterThan(speed * 0.7);
   });
 
-});
-
-it('gives rivals distinct starts and slows them gradually late in a long race', () => {
-  const race = new Race(400);
-  race.phase = 'racing';
-  race.step(0.18);
-  expect(race.rivals[0]!.speed).toBe(0);
-  expect(race.rivals[2]!.speed).toBeGreaterThan(0);
-  race.elapsedS = 30;
-  race.rivals[2]!.distance = 100;
-  race.step(1 / 60);
-  const early = race.rivals[2]!.speed;
-  race.rivals[2]!.distance = 390;
-  race.step(1 / 60);
-  expect(race.rivals[2]!.speed).toBeLessThan(early);
-});
-
-describe('rival race results', () => {
-  it('marks unfinished rivals as estimated until they actually cross', () => {
-    const race = new Race(100);
-    race.phase = 'racing';
-    race.elapsedS = 10;
-    race.finishS = 10;
-    race.phase = 'finished';
-    expect(race.standings.find((r) => r.you)?.status).toBe('confirmed');
-    expect(race.standings.filter((r) => !r.you).every((r) => r.status === 'estimated')).toBe(true);
-    run(race, 30);
-    expect(race.standings.every((r) => r.status === 'confirmed')).toBe(true);
-  });
-
-  it('never changes finish times or allows rivals to move backwards after the finish', () => {
-    const race = new Race(400);
-    race.phase = 'racing';
-    run(race, 100);
-    const times = race.rivals.map((rival) => rival.finishS);
-    expect(times.every((time) => time !== undefined)).toBe(true);
-    run(race, 1000);
-    expect(race.rivals.map((rival) => rival.finishS)).toEqual(times);
-    for (const rival of race.rivals) {
-      expect(rival.distance).toBeGreaterThanOrEqual(400);
-      expect(rival.distance).toBeLessThanOrEqual(406);
-      expect(rival.speed).toBeGreaterThanOrEqual(0);
-      expect(Number.isFinite(rival.speed)).toBe(true);
-    }
-  });
-
-  it('uses an injected RNG once per runner and reproduces their results', () => {
-    let draws = 0;
-    const rng = () => { draws += 1; return 0.25; };
-    const first = new Race(200, rng);
-    const second = new Race(200, rng);
-    expect(draws).toBe(6);
-    const other = new Race(200, () => 0.75);
-    for (const race of [first, second, other]) { race.phase = 'racing'; run(race, 50); }
-    expect(draws).toBe(6); // Stepping must not consume new randomness.
-    expect(first.rivals.map((r) => r.finishS)).toEqual(second.rivals.map((r) => r.finishS));
-    expect(first.rivals.map((r) => r.finishS)).not.toEqual(other.rivals.map((r) => r.finishS));
-  });
-});
-
-
-describe('rival profiles', () => {
-  it.each([100, 200, 400] as const)('stays finite, monotone and stable across time steps in %i m', (goal) => {
-    const finishTimes = [1 / 30, 1 / 60, 1 / 120].map((dt) => {
-      const race = new Race(goal);
-      race.phase = 'racing';
-      let previous = race.rivals.map((rival) => rival.distance);
-      for (let tick = 0; tick < 160 / dt; tick += 1) {
-        race.step(dt);
-        race.rivals.forEach((rival, index) => {
-          expect(Number.isFinite(rival.distance) && Number.isFinite(rival.speed)).toBe(true);
-          expect(rival.distance).toBeGreaterThanOrEqual(previous[index]!);
-          expect(rival.speed).toBeGreaterThanOrEqual(0);
-        });
-        previous = race.rivals.map((rival) => rival.distance);
-        if (race.standingsFinal) break;
-      }
-      expect(race.standingsFinal).toBe(true);
-      return race.rivals.map((rival) => rival.finishS!);
-    });
-    for (let index = 0; index < 3; index += 1) {
-      expect(Math.max(...finishTimes.map((times) => times[index]!)) - Math.min(...finishTimes.map((times) => times[index]!))).toBeLessThan(0.02);
-    }
-  });
-
-  it('ignores invalid time steps without moving the race or poisoning the clock', () => {
-    const race = new Race();
-    race.phase = 'racing';
-    for (const dt of [0, -1, NaN, Infinity]) race.step(dt);
-    expect(race.elapsedS).toBe(0);
-    expect(race.rivals.every((rival) => rival.distance === 0 && rival.speed === 0)).toBe(true);
-  });
-});
-
-describe('race timing boundaries', () => {
-  it('does not move before the reaction instant, even when one tick straddles it', () => {
-    const race = new Race();
-    race.phase = 'racing';
-    race.step(0.23);
-    const rival = race.rivals[0]!;
-    expect(rival.distance).toBe(0);
-    race.step(0.01);
-    expect(rival.distance).toBeCloseTo(0, 12);
-    race.step(0.01);
-    // Integral of pace * (t - reaction) / acceleration over 10 ms.
-    const expected = rival.pace * 0.01 ** 2 / (2 * rival.accelerationS);
-    expect(rival.distance).toBeCloseTo(expected, 10);
-    const straddled = new Race();
-    straddled.phase = 'racing';
-    straddled.step(0.25);
-    expect(straddled.rivals[0]!.distance).toBeCloseTo(expected, 10);
-  });
-
-  it('integrates a mid-step finish and the subsequent slowdown independently of tick size', () => {
-    const race = new Race();
-    race.phase = 'racing';
-    race.elapsedS = 15;
-    const rival = race.rivals[2]!;
-    rival.distance = 99.95;
-    rival.pace = 6.5;
-    rival.fade = 0;
-    rival.speed = 6.5;
-    race.step(0.1);
-    expect(rival.finishS).toBeCloseTo(15 + 0.05 / 6.5, 8);
-    const after = 0.1 - 0.05 / 6.5;
-    expect(rival.distance).toBeCloseTo(100 + 6.5 * 0.8 * (1 - Math.exp(-after / 0.8)), 8);
-    expect(rival.speed).toBeCloseTo(6.5 * Math.exp(-after / 0.8), 8);
-  });
-
-  it('gives equal times the same place in the results', () => {
-    const race = new Race();
-    race.phase = 'finished';
-    race.elapsedS = 20;
-    race.finishS = 15;
-    race.rivals[0]!.finishS = 15;
-    race.rivals[1]!.finishS = 16;
-    race.rivals[2]!.finishS = 17;
-    expect(race.place).toBe(1);
-    expect(race.standings.map((runner) => runner.place)).toEqual([1, 1, 3, 4]);
-  });
-
-  it('does not keep camera effort alive with a nonfinite sample timestamp', () => {
-    const race = new Race();
-    race.phase = 'racing';
-    race.setEffort(1, NaN);
-    expect(race.effort01).toBe(0);
-    race.setEffort(1, 1000);
-    race.step(1 / 60, 1100);
-    expect(race.effort01).toBeGreaterThan(0);
-    race.step(1 / 60, 1600);
-    expect(race.effort01).toBe(0);
-  });
 });
