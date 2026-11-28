@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { HandCursorDetector, type MenuHandSnapshot } from '../src/kinematics/handCursor';
+import { HandCursorDetector, type MenuHandSnapshot, rotationBlocksHandInput } from '../src/kinematics/handCursor';
 import { emptyHand, hand } from './fixtures/menuHand';
 import { rotationalWorldLandmarks } from './fixtures/rotationalHand';
 
@@ -38,8 +38,8 @@ describe('hand cursor synchronization and active zone', () => {
       detector.update(hand(100, { tipX: 0.5 })),
       detector.update(hand(200, { tipX: 0.7 })),
     ];
-    expect(states[0]).toMatchObject({ syncProgress: 0, synced: false, visible: false });
-    expect(states[1]).toMatchObject({ syncProgress: 0.5, synced: false, visible: false });
+    expect(states[0]).toMatchObject({ syncProgress: 0, synced: false, visible: true });
+    expect(states[1]).toMatchObject({ syncProgress: 0.5, synced: false, visible: true });
     expect(states[2]).toMatchObject({ syncProgress: 1, synced: true, visible: true });
   });
 
@@ -75,10 +75,24 @@ describe('hand cursor synchronization and active zone', () => {
     const before = detector.update(hand(1100, { tipX: 0.4, tipY: 0.4 }));
     expect(before.synced).toBe(true);
     expect(detector.update(emptyHand(1200))).toMatchObject({ visible: true, synced: true, x: before.x, y: before.y });
-    const reacquired = detector.update(hand(1450, { tipX: 0.7, tipY: 0.7 }));
+    const reacquired = detector.update(hand(1700, { tipX: 0.7, tipY: 0.7 }));
     expect(reacquired).toMatchObject({ visible: true, synced: true });
     expect(reacquired.x).toBeCloseTo(0.3);
     expect(reacquired.y).toBeCloseTo(0.7);
+  });
+
+  it('keeps filtering across a late inference instead of snapping to the new sample', () => {
+    const detector = synched();
+    const before = detector.update(hand(1100, { tipX: 0.4 })).x;
+    const late = detector.update(hand(1500, { tipX: 0.7 })).x;
+    expect(late).toBeGreaterThan(0.3);
+    expect(late).toBeLessThan(before);
+  });
+
+  it('stays synchronized through a 500ms occlusion', () => {
+    const detector = synched();
+    detector.update(emptyHand(1100));
+    expect(detector.update(emptyHand(1600))).toMatchObject({ synced: true, visible: true });
   });
 
   it('requires synchronization again after a long loss', () => {
@@ -92,7 +106,7 @@ describe('hand cursor synchronization and active zone', () => {
     const detector = synched();
     expect(detector.update(emptyHand(1100))).toMatchObject({ visible: true, synced: true });
     const reacquired = detector.update(hand(2000));
-    expect(reacquired).toMatchObject({ visible: false, synced: false, syncProgress: 0 });
+    expect(reacquired).toMatchObject({ synced: false, syncProgress: 0 });
   });
 
   it('does not reuse a stale frozen position after a long tracking loss', () => {
@@ -122,22 +136,12 @@ describe('hand cursor synchronization and active zone', () => {
 });
 
 describe('hand cursor hand validation', () => {
-  it('never synchronizes while the handedness score stays below 0.75', () => {
+  it('synchronizes a geometrically valid hand however low the handedness score is', () => {
     const detector = new HandCursorDetector();
-    let state = detector.update({ ...hand(0), handednessScore: 0.5 });
-    for (let time = 100; time <= 1000; time += 100) state = detector.update({ ...hand(time), handednessScore: 0.5 });
-    expect(state).toMatchObject({ synced: false, syncProgress: 0, visible: false });
-  });
-
-  it('synchronizes with a handedness score of exactly 0.75 or with no score at all', () => {
-    for (const handednessScore of [0.75, undefined]) {
-      const detector = new HandCursorDetector();
-      let synced = false;
-      for (let time = 0; time <= 300; time += 100) {
-        synced = detector.update({ ...hand(time), handednessScore }).synced || synced;
-      }
-      expect(synced).toBe(true);
-    }
+    const turned = (time: number) => ({ ...hand(time), handednessScore: 0.5 });
+    let state = detector.update(turned(0));
+    for (let time = 100; time <= 300; time += 100) state = detector.update(turned(time));
+    expect(state).toMatchObject({ synced: true, visible: true });
   });
 
   it('rejects a degenerate palm scale while the same shape above 0.03 synchronizes', () => {
@@ -181,15 +185,15 @@ describe('hand cursor hand validation', () => {
 describe('hand cursor distance-sensitive active zone', () => {
   it('shrinks the zone for a close hand so the screen edge is reached before the camera edge', () => {
     const detector = new HandCursorDetector();
-    let state = detector.update(hand(0, { scale: 0.3, tipX: 0.37, tipY: 0.5 }));
+    let state = detector.update(hand(0, { scale: 0.3, tipX: 0.27, tipY: 0.5 }));
     for (let time = 100; time <= 1000; time += 100) {
-      state = detector.update(hand(time, { scale: 0.3, tipX: 0.37, tipY: 0.5 }));
+      state = detector.update(hand(time, { scale: 0.3, tipX: 0.27, tipY: 0.5 }));
     }
-    expect(state.activeZone.minX).toBeCloseTo(0.37);
-    expect(state.activeZone.maxX).toBeCloseTo(0.63);
-    expect(state.activeZone.minY).toBeCloseTo(0.37);
-    expect(state.activeZone.maxY).toBeCloseTo(0.63);
-    // camera x 0.37 mirrors to pointer x 0.63, the inner edge of the shrunk zone
+    expect(state.activeZone.minX).toBeCloseTo(0.27);
+    expect(state.activeZone.maxX).toBeCloseTo(0.73);
+    expect(state.activeZone.minY).toBeCloseTo(0.27);
+    expect(state.activeZone.maxY).toBeCloseTo(0.73);
+    // camera x 0.27 mirrors to pointer x 0.73, the inner edge of the shrunk zone
     expect(state.x).toBeCloseTo(1);
   });
 
@@ -201,6 +205,21 @@ describe('hand cursor distance-sensitive active zone', () => {
     }
     expect(state.activeZone).toMatchObject({ minX: 0, maxX: 1, minY: 0, maxY: 1 });
     expect(state.x).toBeCloseTo(0.75);
+  });
+
+  it('holds the zone still while the hand scale only wobbles, as a tilting palm does', () => {
+    const detector = new HandCursorDetector();
+    const settled = detector.update(hand(0, { scale: 0.2 })).activeZone;
+    for (let time = 33; time <= 2000; time += 33) {
+      const state = detector.update(hand(time, { scale: time % 66 === 0 ? 0.212 : 0.188 }));
+      expect(state.activeZone).toEqual(settled);
+    }
+  });
+
+  it('keeps the zone through a late inference instead of jumping to the new scale', () => {
+    const detector = synched();
+    const before = detector.update(hand(1100)).activeZone;
+    expect(detector.update(hand(1500, { scale: 0.3 })).activeZone.minX - before.minX).toBeLessThan(0.1);
   });
 
   it('never overrides an explicit active zone even for a close hand', () => {
@@ -530,7 +549,8 @@ describe('hand cursor rotational flick arbitration', () => {
     const detector = syncRotational();
     const rotating = rotate(detector, 216, 12, { pinchRatio: 0.2 });
     expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
-    expect(rotating.every((state) => !state.pinchRelease && !state.pinching)).toBe(true);
+    const committed = rotating.filter((state) => rotationBlocksHandInput(state.rotationPhase));
+    expect(committed.every((state) => !state.pinchRelease && !state.pinching)).toBe(true);
 
     const stillHeld = detector.update(rotationalMenuHand(500, 33, { pinchRatio: 0.2, rotationEnabled: false }));
     expect(stillHeld).toMatchObject({ pinchRelease: false, pinching: false });
@@ -544,21 +564,25 @@ describe('hand cursor rotational flick arbitration', () => {
     const detector = syncRotational();
     const rotating = rotate(detector, 216, 12, { imageCurl: 1, pinchRatio: 0.2 });
     expect(rotating.some((state) => state.rotationPhase === 'ROTATING')).toBe(true);
-    expect(rotating.every((state) => state.backProgress === 0)).toBe(true);
+    const committed = rotating.filter((state) => rotationBlocksHandInput(state.rotationPhase));
+    expect(committed.every((state) => state.backProgress === 0)).toBe(true);
     const after = detector.update(rotationalMenuHand(500, 33, { imageCurl: 1, pinchRatio: 0.2, rotationEnabled: false }));
     expect(after.backProgress).toBe(0);
   });
 
-  it('freezes the cursor position while rotation owns the hand', () => {
+  it('keeps following a rotation candidate and freezes only once rotation is committed', () => {
     const detector = syncRotational();
-    const before = detector.update(rotationalMenuHand(216, 0, { tipX: 0.5 }));
-    const moving = [];
+    const states = [detector.update(rotationalMenuHand(216, 0, { tipX: 0.5 }))];
     for (let frame = 1; frame < 12; frame += 1) {
-      moving.push(detector.update(rotationalMenuHand(216 + frame * 16, frame * 3, { tipX: 0.5 + frame * 0.02 })));
+      states.push(detector.update(rotationalMenuHand(216 + frame * 16, frame * 3, { tipX: 0.5 + frame * 0.02 })));
     }
-    const active = moving.filter((state) => state.rotationPhase !== 'IDLE');
-    expect(active.length).toBeGreaterThan(0);
-    expect(active.every((state) => state.x === before.x && state.y === before.y)).toBe(true);
+    const firstRotating = states.findIndex((state) => state.rotationPhase === 'ROTATING');
+    const candidate = states.findIndex((state) => state.rotationPhase === 'ROTATION_CANDIDATE');
+    expect(candidate).toBeGreaterThan(0);
+    expect(firstRotating).toBeGreaterThan(candidate);
+    expect(states[candidate]!.x).not.toBe(states[candidate - 1]!.x);
+    const held = states[firstRotating - 1]!;
+    expect(states.slice(firstRotating).every((state) => state.x === held.x && state.y === held.y)).toBe(true);
   });
 
   it('cancels rotation on tracking loss instead of leaving velocity or gestures armed', () => {

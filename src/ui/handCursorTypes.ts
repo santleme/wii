@@ -5,6 +5,8 @@ import type {
   RotationalHandShape,
 } from '@wii/spatial-core';
 
+export { rotationBlocksHandInput } from '../kinematics/handCursor';
+
 /** Contrato de entrada do cursor de mão. Quem o preenche é o pipeline de CV; a UI só consome. */
 export type HandCursorInput = {
   /** Há mão rastreada e o modo 'hand' está ativo. */
@@ -52,8 +54,3 @@ export const HAND_IDLE: HandCursorInput = {
   rotationAngularVelocity: 0,
   rotationDirection: 0,
 };
-
-/** Qualquer fase não ociosa bloqueia hover, clique e voltar até o próximo rearme gestual. */
-export function rotationBlocksHandInput(phase: RotationalFlickPhase): boolean {
-  return phase !== 'IDLE';
-}

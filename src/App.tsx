@@ -203,7 +203,6 @@ export default function App({ exit }: { exit?: ReactNode }) {
         landmarks: primary?.landmarks ?? [],
         worldLandmarks: primary?.worldLandmarks,
         handedness: primary?.handedness,
-        handednessScore: primary?.handednessScore,
         aspectY,
         rotationEnabled: screenRef.current === 'home' && homeRotationGateRef.current,
       });
