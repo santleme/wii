@@ -40,6 +40,14 @@ describe('1-Euro filter', () => {
     expect(Number.isFinite(after)).toBe(true);
     expect(after).toBeGreaterThan(0);
   });
+
+  it('never returns a non-finite value, even when the first sample is non-finite', () => {
+    const filter = new OneEuroFilter({ minCutoff: 1, beta: 0.5, derivativeCutoff: 1 });
+    expect(Number.isFinite(filter.filter(Number.NaN, 0))).toBe(true);
+    expect(Number.isFinite(filter.filter(1, Number.NaN))).toBe(true);
+    // The first finite sample still seeds the filter and passes through untouched.
+    expect(filter.filter(0.5, 33)).toBe(0.5);
+  });
 });
 
 describe('landmark confidence', () => {

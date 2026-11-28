@@ -21,7 +21,8 @@ export class OneEuroFilter {
   filter(value: number, timestampMs: number): number {
     // A non-finite sample is no sample: storing it would poison every later output,
     // because NaN propagates through the derivative and low-pass state until reset().
-    if (!Number.isFinite(value) || !Number.isFinite(timestampMs)) return this.previousFiltered ?? value;
+    // With no finite sample yet, 0 is the neutral output — returning `value` here would leak the very non-finite sample this guard exists to reject.
+    if (!Number.isFinite(value) || !Number.isFinite(timestampMs)) return this.previousFiltered ?? 0;
     if (this.previousFiltered === undefined || this.previousTimeMs === undefined) {
       this.previousFiltered = value;
       this.previousTimeMs = timestampMs;
