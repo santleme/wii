@@ -31,6 +31,7 @@
   .ring-arrow.right { right: 3%; }
   .ring-arrow:hover { box-shadow: 0 0 0 5px #34beed55, 0 5px 14px rgba(26, 110, 168, .35); }
   .channel-ring.is-gesture-controlled .channel { transition: none; }
+  .games-ring.is-gesture-controlled .game-card { transition: box-shadow .25s; }
 
   .wii-bar { position: relative; flex: 0 0 clamp(130px, 25vh, 210px); text-align: center; }
   .wii-bar svg { position: absolute; inset: 0; width: 100%; height: 100%; }

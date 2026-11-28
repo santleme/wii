@@ -33,6 +33,7 @@ export function HandPanel({ sourceRef, canvasRef, cameraOn, status, synced, onSt
     <ul className="hand-legend">
       <li><b>Pinça</b> = clicar</li>
       <li><b>Segure o gesto</b> = Fechar/Voltar</li>
+      <li><b>Aceno lateral</b> = girar a roda</li>
     </ul>
     <div className="hand-actions">
       {!cameraOn && <button type="button" className="wii-btn" onClick={onStart}>Ligar câmera</button>}

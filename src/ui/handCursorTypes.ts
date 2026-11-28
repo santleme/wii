@@ -30,6 +30,8 @@ export type HandCursorInput = {
   /** Velocidade arbitrada pronta para o carrossel, em deg/s. */
   rotationAngularVelocity: number;
   rotationDirection: -1 | 0 | 1;
+  /** Pulso de uma amostra: passo da roda pedido por um aceno lateral. */
+  swipeDirection: -1 | 0 | 1;
   /** Diagnóstico opcional: velocidade filtrada/bruta, curvatura, base 3D e qualidade temporal. */
   rotationFilteredAngularVelocity?: number;
   rotationRawAngularVelocity?: number;
@@ -53,4 +55,5 @@ export const HAND_IDLE: HandCursorInput = {
   rotationPhase: 'IDLE',
   rotationAngularVelocity: 0,
   rotationDirection: 0,
+  swipeDirection: 0,
 };

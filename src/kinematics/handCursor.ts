@@ -11,6 +11,7 @@ import {
   type RotationalFlickState,
   type RotationalHandShape,
 } from '@wii/spatial-core';
+import { HandSwipeDetector } from './handSwipe';
 import { clamp } from './math';
 
 export interface MenuHandSnapshot {
@@ -70,6 +71,8 @@ export interface HandCursorState {
   rotationFilteredAngularVelocity: number;
   rotationRawAngularVelocity: number;
   rotationDirection: -1 | 0 | 1;
+  /** Pulso de uma amostra: passo da roda pedido por um aceno lateral. */
+  swipeDirection: -1 | 0 | 1;
   rotationCurvature: number;
   rotationHandShape: RotationalHandShape;
   rotationRejectReason?: RotationalFlickRejection;
@@ -203,6 +206,7 @@ export class HandCursorDetector {
   private readonly pinchCooldownMs: number;
   private readonly pinchPressMs: number;
   private readonly rotationDetector: RotationalFlickDetector;
+  private readonly swipeDetector = new HandSwipeDetector();
   private pinchActive = false;
   private pinchCandidateSinceMs?: number;
   private presenceMs = 0;
@@ -323,6 +327,21 @@ export class HandCursorDetector {
     let pinchRelease = false;
     let backProgress = 0;
     let fist = false;
+    // Judged on the raw anchor in camera space, so neither smoothing nor the active zone delays it.
+    const swipe = this.swipeDetector.update({
+      timestampMs,
+      x: raw.x,
+      y: raw.y * aspectY,
+      blocked:
+        !this.synced ||
+        rotation.phase !== 'IDLE' ||
+        this.pinchActive ||
+        this.pinchCandidateSinceMs !== undefined ||
+        this.fistActive ||
+        closedFist(points, false, this.fistEnterStraightness, this.fistReleaseStraightness, aspectY),
+    });
+    // Fingers touching mid-swipe must not click: they have to part again first.
+    if (swipe.moving) this.pinchNeedsRelease = true;
     if (this.synced) {
       const updatePinch = () => {
         const ratio = pinchRatio(points, aspectY);
@@ -435,6 +454,7 @@ export class HandCursorDetector {
       pinching,
       pinchRelease,
       backProgress,
+      swipeDirection: swipe.direction,
       activeZone: { ...this.activeZone },
       ...this.rotationOutput(rotation),
     };
@@ -461,6 +481,7 @@ export class HandCursorDetector {
     this.pinchActive = false;
     this.pinchCandidateSinceMs = undefined;
     this.rotationDetector.reset();
+    this.swipeDetector.reset();
   }
 
   private missing(snapshot: MenuHandSnapshot): HandCursorState {
@@ -483,6 +504,7 @@ export class HandCursorDetector {
     this.lastFreePosition = undefined;
     this.backSinceMs = undefined;
     this.fistActive = false;
+    this.swipeDetector.disarm();
     const position = this.lastPosition ?? { x: 0, y: 0 };
     const stillSyncing =
       !this.synced && this.lastPosition !== undefined && timestampMs - this.missingSinceMs <= PRESENCE_GAP_MS;
@@ -495,6 +517,7 @@ export class HandCursorDetector {
       pinching: false,
       pinchRelease: false,
       backProgress: 0,
+      swipeDirection: 0,
       activeZone: { ...this.activeZone },
       ...this.rotationOutput(rotation),
     };

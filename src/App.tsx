@@ -63,7 +63,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
   // Hand samples stay out of React state: App re-renders only when synchronization flips.
   const [handStore] = useState(createHandInputStore);
   const handSynced = useHandInput(handStore, (hand) => hand.current.synced);
-  const homeRotationGateRef = useRef(false);
+  const rotationGateRef = useRef(false);
   const carouselDebugRef = useRef<CarouselStepResult | undefined>(undefined);
   const videoRef = useRef<HTMLVideoElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -202,7 +202,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
         worldLandmarks: primary?.worldLandmarks,
         handedness: primary?.handedness,
         aspectY,
-        rotationEnabled: screenRef.current === 'home' && homeRotationGateRef.current,
+        rotationEnabled: (screenRef.current === 'home' || screenRef.current === 'games') && rotationGateRef.current,
       });
       handStore.publish({
         visible: state.visible,
@@ -213,6 +213,7 @@ export default function App({ exit }: { exit?: ReactNode }) {
         pinching: state.pinching,
         pinchRelease: state.pinchRelease,
         backProgress: state.backProgress,
+        swipeDirection: state.swipeDirection,
         capturedAtMs: snapshot.timestampMs,
         rotationPhase: state.rotationPhase,
         rotationAngularVelocity: state.rotationAngularVelocity,
@@ -396,13 +397,16 @@ export default function App({ exit }: { exit?: ReactNode }) {
       <HomeMenu
         exit={exit}
         onGames={() => setScreen('games')}
-        handInputRef={handStore}
-        rotationGateRef={homeRotationGateRef}
+        handStore={handStore}
+        rotationGateRef={rotationGateRef}
         carouselDebugRef={carouselDebugRef}
       />
     )}
     {screen === 'title' && <TitleMenu onStart={() => setScreen('games')} onBack={() => setScreen('home')} />}
-    {screen === 'games' && <GamesMenu onHome={() => setScreen('home')} onPick={play} onBack={() => setScreen('home')} />}
+    {screen === 'games' && <GamesMenu
+      onHome={() => setScreen('home')} onPick={play} onBack={() => setScreen('home')}
+      handStore={handStore} rotationGateRef={rotationGateRef} carouselDebugRef={carouselDebugRef}
+    />}
 
     {screen === 'play' && <div className="hud-dock">
       <button type="button" className="dock-btn" onClick={() => setScreen('games')}>‹ Jogos</button>

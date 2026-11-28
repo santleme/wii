@@ -4,7 +4,8 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CarouselStepResult } from '../src/ui/carouselController';
 import { HAND_IDLE, type HandCursorInput } from '../src/ui/handCursorTypes';
-import { HomeMenu } from '../src/ui/WiiMenu';
+import { createHandInputStore } from '../src/ui/handInputStore';
+import { GamesMenu, HomeMenu } from '../src/ui/WiiMenu';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -44,20 +45,95 @@ function renderHome(input: HandCursorInput) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  const handInputRef = { current: input };
+  const handStore = createHandInputStore(input);
   const rotationGateRef = { current: false };
   const carouselDebugRef: { current: CarouselStepResult | undefined } = { current: undefined };
   act(() => {
     root.render(createElement(HomeMenu, {
       onGames: vi.fn(),
       exit: null,
-      handInputRef,
+      handStore,
       rotationGateRef,
       carouselDebugRef,
     }));
   });
-  return { container, root, handInputRef, rotationGateRef, carouselDebugRef };
+  return { container, root, handStore, rotationGateRef, carouselDebugRef };
 }
+
+function renderGames(onPick = vi.fn()) {
+  const container = document.body.appendChild(document.createElement('div'));
+  const root = createRoot(container);
+  const handStore = createHandInputStore();
+  const rotationGateRef = { current: false };
+  act(() => {
+    root.render(
+      createElement(GamesMenu, { onPick, onBack: vi.fn(), onHome: vi.fn(), handStore, rotationGateRef }),
+    );
+  });
+  const front = () => container.querySelector('.game-card.is-front')!;
+  return { container, root, handStore, rotationGateRef, onPick, front };
+}
+
+const tracked: HandCursorInput = { ...HAND_IDLE, visible: true, synced: true };
+
+describe('GamesMenu hand carousel', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    document.body.innerHTML = '';
+  });
+
+  it('turns with the palm, follows the front card in React and settles on a whole slot', () => {
+    mockReducedMotion();
+    const raf = mockRaf();
+    const { container, root, handStore, rotationGateRef, front } = renderGames();
+    expect(rotationGateRef.current).toBe(true);
+    expect(front().className).toContain('tennis');
+
+    let now = 1000;
+    const run = (input: Partial<HandCursorInput>, frames: number) => {
+      for (let index = 0; index < frames; index += 1) {
+        now += 16;
+        handStore.publish({ ...tracked, capturedAtMs: now, ...input });
+        act(() => raf.fire(now));
+      }
+    };
+    run({ rotationPhase: 'ROTATING', rotationAngularVelocity: 360 }, 24);
+    expect(front().className).not.toContain('tennis');
+    expect(container.querySelector('.games-ring')!.className).toContain('is-gesture-controlled');
+    run({}, 60);
+    expect(container.querySelector('.games-ring')!.className).not.toContain('is-gesture-controlled');
+    expect(front().getAttribute('style')).toContain('left: 50%');
+    act(() => root.unmount());
+    expect(rotationGateRef.current).toBe(false);
+  });
+
+  it('steps one card per swipe pulse and launches only the front card', () => {
+    mockReducedMotion();
+    mockRaf();
+    const { container, root, handStore, onPick, front } = renderGames();
+    act(() => handStore.publish({ ...tracked, swipeDirection: 1 }));
+    expect(front().className).toContain('boxing');
+    act(() => handStore.publish(tracked));
+    act(() => handStore.publish({ ...tracked, swipeDirection: -1 }));
+    expect(front().className).toContain('tennis');
+
+    act(() => container.querySelector<HTMLButtonElement>('.game-card.athletics')!.click());
+    expect(onPick).not.toHaveBeenCalled();
+    act(() => container.querySelector<HTMLButtonElement>('.game-card.athletics')!.click());
+    expect(onPick).toHaveBeenCalledWith('athletics');
+    act(() => root.unmount());
+  });
+
+  it('ignores a swipe from an unsynchronized hand', () => {
+    mockReducedMotion();
+    mockRaf();
+    const { root, handStore, front } = renderGames();
+    act(() => handStore.publish({ ...tracked, synced: false, swipeDirection: 1 }));
+    expect(front().className).toContain('tennis');
+    act(() => root.unmount());
+  });
+});
 
 describe('HomeMenu rotational carousel integration', () => {
   afterEach(() => {
@@ -144,7 +220,7 @@ describe('HomeMenu rotational carousel integration', () => {
       rotationAngularVelocity: 180,
       rotationDirection: 1,
     };
-    const { container, root, handInputRef } = renderHome(HAND_IDLE);
+    const { container, root, handStore } = renderHome(HAND_IDLE);
     const firstChannel = container.querySelector<HTMLElement>('.channel')!;
     act(() => {
       raf.fire(1000);
@@ -152,7 +228,7 @@ describe('HomeMenu rotational carousel integration', () => {
     expect(firstChannel.style.left).toBe('50%');
     expect(raf.callbacks.size).toBe(1);
 
-    handInputRef.current = rotating;
+    handStore.publish(rotating);
     act(() => {
       raf.fire(1016);
       raf.fire(1032);
