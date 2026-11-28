@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adjudicationDt, applySprint, applyStep, easeSpeed, gaitFor, type Gait, nextPace, type Pace, stumble } from '../src/games/track/gait';
+import { adjudicationDt, applySprint, applyStep, CAMERA_INPUT_STALE_MS, easeSpeed, gaitFor, type Gait, inputFreshness, nextPace, type Pace, stumble } from '../src/games/track/gait';
 import type { CadenceResult } from '../src/kinematics/cadenceTracker';
 import { poseWithHipBounce } from './fixtures/syntheticPose';
 import { cadenceHarness } from './fixtures/torsoHarness';
@@ -231,6 +231,28 @@ describe('pace ownership between camera and keyboard', () => {
 
     const keyboard: Pace = { owner: 'keyboard', speed01: 0.8, cadenceSpm: 0, cameraTracking: 'degraded' };
     expect(adjudicationDt(keyboard, 1 / 60)).toBeCloseTo(1 / 60);
+  });
+
+  it('gives one freshness verdict per source combination', () => {
+    const camera = (cameraTracking?: Pace['cameraTracking']): Pace => ({ owner: 'camera', speed01: 0.8, cadenceSpm: 150, cameraTracking });
+    const within = CAMERA_INPUT_STALE_MS;
+    const beyond = CAMERA_INPUT_STALE_MS + 1;
+    // Measured input inside the budget is fresh, from either tracking source.
+    expect(inputFreshness(camera(undefined), 0)).toBe('fresh');
+    expect(inputFreshness(camera('tracked'), within)).toBe('fresh');
+    // Degraded input inside the budget coasts: scrolls, but is never judged.
+    expect(inputFreshness(camera('degraded'), 0)).toBe('coasting');
+    expect(inputFreshness(camera('degraded'), within)).toBe('coasting');
+    // Anything past the budget is stale, whatever the last state said.
+    expect(inputFreshness(camera('tracked'), beyond)).toBe('stale');
+    expect(inputFreshness(camera('degraded'), beyond)).toBe('stale');
+    expect(inputFreshness(camera(undefined), beyond)).toBe('stale');
+    // States that are neither measured nor coasting never move anything.
+    expect(inputFreshness(camera('lost'), 0)).toBe('stale');
+    expect(inputFreshness(camera('calibrating'), 0)).toBe('stale');
+    // Keyboard ownership never consults the camera.
+    const keyboard: Pace = { owner: 'keyboard', speed01: 0.8, cadenceSpm: 0, cameraTracking: 'lost' };
+    expect(inputFreshness(keyboard, beyond)).toBe('fresh');
   });
 });
 

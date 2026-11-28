@@ -33,11 +33,30 @@ export function applySprint(pace: Pace, event: { speed01: number; cadenceSpm: nu
   return pace.owner === 'camera' ? { ...pace, speed01: event.speed01, cadenceSpm: event.cadenceSpm, cameraTracking: event.trackingState } : pace;
 }
 
-const CAMERA_INPUT_STALE_MS = 400;
+/** How long the last camera input stays usable, for adjudication and for visual coasting alike. */
+export const CAMERA_INPUT_STALE_MS = 400;
+
+export type InputFreshness = 'fresh' | 'coasting' | 'stale';
+
+/**
+ * The one verdict on whether the run may move, computed from the two sources that used to be
+ * read apart: the tracking state the sprint events carry (`pace.cameraTracking`) and the age
+ * of the last one. The gate's own tracking label is not an input here — it pauses the whole
+ * run, upstream of this per-frame decision.
+ * - `fresh`: measured input (tracked, or none reported yet) inside the stale budget — physics runs.
+ * - `coasting`: degraded input inside the budget — the picture may scroll on, physics may not.
+ * - `stale`: past the budget, or a state that is neither measured nor coasting — nothing moves.
+ * Keyboard ownership never consults the camera: its input is always fresh.
+ */
+export function inputFreshness(pace: Pace, cameraInputAgeMs = 0): InputFreshness {
+  if (pace.owner === 'keyboard') return 'fresh';
+  if (cameraInputAgeMs > CAMERA_INPUT_STALE_MS) return 'stale';
+  if (pace.cameraTracking === undefined || pace.cameraTracking === 'tracked') return 'fresh';
+  return pace.cameraTracking === 'degraded' ? 'coasting' : 'stale';
+}
 
 export function adjudicationDt(pace: Pace, dt: number, cameraInputAgeMs = 0): number {
-  const measuredCameraInput = (pace.cameraTracking === undefined || pace.cameraTracking === 'tracked') && cameraInputAgeMs <= CAMERA_INPUT_STALE_MS;
-  return pace.owner === 'keyboard' || measuredCameraInput ? dt : 0;
+  return inputFreshness(pace, cameraInputAgeMs) === 'fresh' ? dt : 0;
 }
 
 const EASE_RATE = 6;
