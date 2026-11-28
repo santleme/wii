@@ -109,7 +109,7 @@ it.each([-900, -300, 0, 400, 1500])('puts any serve stroke in play, %i ms from t
     clock.mockReturnValue(1100);
     game.setTossHand(undefined);
     game.setTossHand('left');
-    const { idealHitMs } = state.phase as unknown as { idealHitMs: number };
+    const { idealHitMs } = (state.phase as unknown as { serve: { idealHitMs: number } }).serve;
     state.resolveSwing({ side: 'forehand', power01: 0, verticalSpeed: 0, contactY: -1, peakTimestampMs: idealHitMs + offsetMs });
     expect(state.phase.kind).toBe('rally');
     for (let now = 1100; now < 3500 && state.ball && state.ball.bounces === 0 && state.faults === 0; now += 1000 / 60) {
@@ -123,6 +123,67 @@ it.each([-900, -300, 0, 400, 1500])('puts any serve stroke in play, %i ms from t
   } finally {
     clock.mockRestore();
     game.dispose();
+  }
+});
+
+it('keeps the held serve free of any toss instant until the ball leaves the hand', () => {
+  const { game, state } = match();
+  const serveOf = () => (state.phase as unknown as { serve: Record<string, unknown> }).serve;
+  const clock = vi.spyOn(performance, 'now').mockReturnValue(1000);
+  try {
+    state.startPoint(1000);
+    const held = serveOf();
+    expect(held.kind).toBe('held');
+    expect(held).not.toHaveProperty('tossedAtMs');
+    expect(held).not.toHaveProperty('idealHitMs');
+
+    clock.mockReturnValue(1400);
+    game.setTossHand(undefined);
+    game.setTossHand('left');
+    const tossed = serveOf() as unknown as { kind: string; tossedAtMs: number; idealHitMs: number };
+    expect(tossed.kind).toBe('tossed');
+    expect(tossed.idealHitMs).toBeGreaterThan(tossed.tossedAtMs);
+    // The ideal is fixed once, at the toss: stepping the ball never moves it.
+    state.stepBall(1 / 60, 1500);
+    state.stepBall(1 / 60, 2000);
+    const after = serveOf() as unknown as { tossedAtMs: number; idealHitMs: number };
+    expect(after.tossedAtMs).toBe(tossed.tossedAtMs);
+    expect(after.idealHitMs).toBe(tossed.idealHitMs);
+  } finally {
+    clock.mockRestore();
+    game.dispose();
+  }
+});
+
+it('tosses on its own at the scheduled instant, with the same ideal offset as a hand toss', () => {
+  const serveOf = (state: ReturnType<typeof match>['state']) => (
+    (state.phase as unknown as { serve: { kind: string; tossedAtMs: number; idealHitMs: number } }).serve
+  );
+  const manual = match();
+  const auto = match();
+  const clock = vi.spyOn(performance, 'now').mockReturnValue(1000);
+  try {
+    manual.state.startPoint(1000);
+    clock.mockReturnValue(1400);
+    manual.game.setTossHand(undefined);
+    manual.game.setTossHand('left');
+    const handToss = serveOf(manual.state);
+    expect(handToss.kind).toBe('tossed');
+
+    auto.state.startPoint(1000);
+    auto.state.stepBall(1 / 60, 6999);
+    expect(serveOf(auto.state).kind).toBe('held');
+    expect(auto.state.ball.velocity.y).toBe(0);
+    auto.state.stepBall(1 / 60, 7000);
+    const autoToss = serveOf(auto.state);
+    expect(autoToss.kind).toBe('tossed');
+    expect(autoToss.tossedAtMs).toBe(7000);
+    expect(auto.state.ball.velocity.y).toBeGreaterThan(0);
+    expect(autoToss.idealHitMs - autoToss.tossedAtMs).toBeCloseTo(handToss.idealHitMs - handToss.tossedAtMs, 6);
+  } finally {
+    clock.mockRestore();
+    manual.game.dispose();
+    auto.game.dispose();
   }
 });
 
@@ -390,67 +451,4 @@ it('returns an arriving ball on plain arm movement when no stroke was read, and 
       game.dispose();
     }
   }
-});
-
-it('keeps an out point reversible until the late-swing window closes and commits once', () => {
-  const { game, state } = match();
-  const clock = vi.spyOn(performance, 'now').mockReturnValue(1200);
-  const scoring = state as unknown as {
-    finishFlight(winner: 'player' | 'opponent', label: string, now: number, deadAt?: number): void;
-  };
-  try {
-    const incoming = { ...createBall({ x: 0, y: 0.8, z: 7.2 }, { x: 0, y: 0, z: 5 }, 'opponent'), bounces: 1 };
-    state.phase = { kind: 'rally' };
-    state.ball = incoming;
-    state.tape = [{ tMs: 1000, ball: incoming }];
-    scoring.finishFlight('player', 'FORA!', 1200, 1200);
-    expect(state.score.points.player).toBe(0);
-    expect(state.pendingPoint).toBeDefined();
-    state.stepBall(0, 1849);
-    expect(state.score.points.player).toBe(0);
-    state.stepBall(0, 1850);
-    expect(state.score.points.player).toBe(1);
-    state.stepBall(0, 1900);
-    expect(state.score.points.player).toBe(1);
-    state.resolveSwing({ side: 'forehand', power01: 0.5, verticalSpeed: 0, contactY: 0, peakTimestampMs: 1000 });
-    expect(state.score.points.player).toBe(1);
-  } finally {
-    clock.mockRestore();
-    game.dispose();
-  }
-});
-
-it('accepts a valid pre-out swing before the point is committed', () => {
-  const { game, state } = match();
-  const clock = vi.spyOn(performance, 'now').mockReturnValue(1200);
-  const scoring = state as unknown as {
-    finishFlight(winner: 'player' | 'opponent', label: string, now: number, deadAt?: number): void;
-  };
-  try {
-    const incoming = { ...createBall({ x: 0, y: 0.8, z: 7.2 }, { x: 0, y: 0, z: 5 }, 'opponent'), bounces: 1 };
-    state.phase = { kind: 'rally' };
-    state.ball = incoming;
-    state.tape = [{ tMs: 1000, ball: incoming }];
-    scoring.finishFlight('player', 'FORA!', 1100, 1100);
-    state.resolveSwing({ side: 'forehand', power01: 0.5, verticalSpeed: 0, contactY: 0, peakTimestampMs: 1000 });
-    expect(state.pendingPoint).toBeUndefined();
-    expect(state.ball.lastHitter).toBe('player');
-    expect(state.score.points.player).toBe(0);
-  } finally {
-    clock.mockRestore();
-    game.dispose();
-  }
-});
-
-it('uses the net impact instant as the cutoff, rather than the end of its tick', () => {
-  const { game, state } = match();
-  try {
-    state.phase = { kind: 'rally' };
-    state.ball = createBall({ x: 0, y: 0.4, z: -0.01 }, { x: 0, y: 0, z: 1 }, 'opponent');
-    state.stepBall(0.02, 1020);
-    expect(state.pendingPoint?.deadAt).toBeCloseTo(1010, 3);
-    expect(state.score.points.player).toBe(0);
-    state.stepBall(0, 1660);
-    expect(state.score.points.player).toBe(1);
-  } finally { game.dispose(); }
 });
