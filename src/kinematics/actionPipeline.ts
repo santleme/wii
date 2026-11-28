@@ -4,7 +4,7 @@ import { CadenceTracker } from './cadenceTracker';
 import { upsideDown } from './framing';
 import { IntensityMeter } from './intensity';
 import { JumpDetector } from './jumpDetector';
-import { DodgeZoneTracker, DuckTracker, LanePositionTracker, REFERENCE_VETO_SPEED_SW_PER_S, RingDepthTracker, ShoulderLineVerticalSpeed } from './postureSignals';
+import { DodgeZoneTracker, DuckTracker, LanePositionTracker, RingDepthTracker } from './postureSignals';
 import { isGuardingPose, PunchDetector, type PunchDiagnostics } from './punchDetector';
 import { classifyPunch } from './punchClassifier';
 import { type ArmMotion, ArmMotionDetector } from './armMotion';
@@ -48,12 +48,6 @@ export class ActionPipeline {
   private readonly ringDepth = new RingDepthTracker();
   private readonly lateralDash = new LateralDashTracker();
   private readonly duckTracker = new DuckTracker();
-  private readonly shoulderSpeed = new ShoulderLineVerticalSpeed();
-  /** Frames where the torso reference moved fast, trimmed to the longest punch window: confirmation
-   * evidence measured while the reference itself moved is torso motion, not arm motion — so a punch
-   * whose onset raced ahead of the veto is still discarded at confirmation, the same adjudication
-   * pattern as the tennis contact. */
-  private referenceVetoAtMs: number[] = [];
   private readonly punchInFlight = new PunchInFlight();
   /** One detector per wrist: whichever arm swings is the racket hand. */
   private readonly swings = ([['right', 16], ['left', 15]] as const).map(([hand, wrist]) => (
@@ -92,11 +86,18 @@ export class ActionPipeline {
     this.heldSwing = undefined;
   }
 
-  update(snapshot: PoseSnapshot, calibration?: CalibrationProfile): { snapshot: PoseSnapshot; events: SportActionEvent[]; controls: ContinuousControls; rawEffort: number; effortSampleAtMs: number | null; armMotions: ArmMotion[]; swingTracking: SwingTracking } {
+  update(snapshot: PoseSnapshot, calibration?: CalibrationProfile, calibrating = false): { snapshot: PoseSnapshot; events: SportActionEvent[]; controls: ContinuousControls; rawEffort: number; effortSampleAtMs: number | null; armMotions: ArmMotion[]; swingTracking: SwingTracking } {
     // An impossible skeleton is a frame without a player, so every gate treats it as a blackout.
     if (upsideDown(snapshot)) snapshot = { ...snapshot, landmarks: [], worldLandmarks: [] };
     const body = this.bodyGate.evaluate(snapshot);
-    const current = { ...snapshot, trackingState: body.state, bodyConfidence: body.confidence };
+    // While the calibrator is still collecting, a frame the body gate can only call
+    // 'degraded' is more honestly 'calibrating' — the state the TrackingState union has
+    // always had and nothing emitted. Only the session snapshot is relabeled: gate
+    // results, events and controls keep the gates' own states, because games make
+    // coasting decisions from them, and every reader of the snapshot state tests
+    // 'tracked'/'lost', so a calibrating frame behaves exactly as the degraded frame
+    // it replaces. A tracked frame is never relabeled, and neither is a lost one.
+    const current = { ...snapshot, trackingState: calibrating && body.state === 'degraded' ? 'calibrating' as const : body.state, bodyConfidence: body.confidence };
     const events: SportActionEvent[] = [];
     let controls: ContinuousControls = { sprintSpeed01: 0, cadenceSpm: 0, trackingState: 'lost' };
 
@@ -214,21 +215,12 @@ export class ActionPipeline {
       controls = { ...controls, guard: isGuardingPose(current, calibration) };
     }
 
-    // The torso reference in fast vertical motion manufactures wrist-relative motion that is
-    // not punching — ducking reads exactly like a rising uppercut. Veto onsets while it lasts.
-    const shoulderNow = this.shoulderSpeed.update(current);
-    // Only the descent manufactures the observed phantom: fists resting in world while the
-    // shoulders drop read as a rising extended arm — an uppercut. The speed estimate lags the
-    // drop by a frame, so the veto is also enforced retroactively at confirmation below.
-    const vetoOnset = shoulderNow !== undefined && shoulderNow >= REFERENCE_VETO_SPEED_SW_PER_S;
-    if (vetoOnset) this.referenceVetoAtMs.push(snapshot.timestampMs);
-    while (this.referenceVetoAtMs[0] && snapshot.timestampMs - this.referenceVetoAtMs[0] > 600) this.referenceVetoAtMs.shift();
     for (const { hand, elbow, wrist, gate, detector } of this.punches) {
       const tracking = gate.evaluate(snapshot, [11, 12, 23, 24, elbow, wrist], 'world');
       if (tracking.state === 'lost' || !swingScaleReady) detector.reset();
       else if (tracking.state === 'degraded') detector.interruptRearm();
       if (!calibration || !swingScaleReady || tracking.state === 'lost') continue;
-      const output = detector.update(current, calibration, vetoOnset);
+      const output = detector.update(current, calibration);
       if (output?.kind === 'onset') {
         this.punchInFlight.start(hand, snapshot.timestampMs);
         events.push({ ...this.eventBase(snapshot, tracking.confidence), id: this.nextId++, type: 'punch-start', hand });

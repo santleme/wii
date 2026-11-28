@@ -125,6 +125,21 @@ function makeWristState(): WristState {
 }
 
 /**
+ * The regime the calibrator is in, derived from the timers and estimates it already keeps —
+ * named here so callers (and the tracking state built on top of calibration) can see it
+ * instead of inferring it from whether a profile happens to exist yet:
+ * - `collecting`: no profile published yet; core evidence is still accumulating.
+ * - `publishing`: a profile is live and quietly blending toward fresh estimates.
+ * - `change-point`: a scale or pose disagreement with the published profile is on the
+ *   clock; once it sustains, the blend hurries to the new reading.
+ * - `center-frozen`: near-center posture evidence has run dry, so the neutral center is
+ *   held at the published value while scale and wrist references keep learning.
+ * - `relocating`: the starvation has lasted long enough that the player is treated as
+ *   having moved, not as holding a lane — admission reopens and the center follows.
+ */
+export type CalibratorPhase = 'collecting' | 'publishing' | 'change-point' | 'center-frozen' | 'relocating';
+
+/**
  * Implicit, online calibration. Instead of asking for a calibration pose, the estimator treats
  * gameplay itself as a stream of noisy evidence: constant quantities (shoulder width) use robust
  * rolling medians; neutral posture uses temporal consensus/mode estimation; wrist ready positions
@@ -140,8 +155,29 @@ export class AdaptiveCalibrator {
   private scaleDisagreementSince?: number;
   private poseDisagreementSince?: number;
   private centerStarvedSince?: number;
+  /** Whether the latest estimate held the neutral center for lack of posture evidence. */
+  private centerFrozen = false;
+  private currentPhase: CalibratorPhase = 'collecting';
   private laneZone: -1 | 0 | 1 = 0;
   private centerBandSw = EXIT_LANE_SW;
+
+  /** The current regime, refreshed by every update; see CalibratorPhase. */
+  get phase(): CalibratorPhase {
+    return this.currentPhase;
+  }
+
+  /**
+   * The one place the phase is decided, in the order the regimes override one another:
+   * relocation reopens admission outright, a live disagreement is actively moving the
+   * profile, and a frozen center is a passive hold on an otherwise publishing estimator.
+   */
+  private derivePhase(now: number): CalibratorPhase {
+    if (this.published === undefined) return 'collecting';
+    if (this.centerStarvedSince !== undefined && now - this.centerStarvedSince >= CENTER_RELOCATION_MS) return 'relocating';
+    if (this.scaleDisagreementSince !== undefined || this.poseDisagreementSince !== undefined) return 'change-point';
+    if (this.centerFrozen) return 'center-frozen';
+    return 'publishing';
+  }
 
   /**
    * Consumes one frame. `laneZone` is the lane state machine's current zone: it is the only
@@ -160,6 +196,9 @@ export class AdaptiveCalibrator {
       this.observeWrists(snapshot);
     }
     this.prune(now);
+    // The phase can only move when an estimate runs, but the relocation deadline is
+    // time-based, so refresh on the way in as well as after the estimate below.
+    this.currentPhase = this.derivePhase(now);
 
     if (!this.hasEnoughCore()) return this.published;
     if (now - this.lastPublishAt < UPDATE_INTERVAL_MS) return this.published;
@@ -168,6 +207,7 @@ export class AdaptiveCalibrator {
     if (!estimate) return this.published;
     this.published = this.published ? this.blendProfile(this.published, estimate, now) : estimate;
     this.lastPublishAt = now;
+    this.currentPhase = this.derivePhase(now);
     return this.published;
   }
 
@@ -319,6 +359,7 @@ export class AdaptiveCalibrator {
     // a wrist reference. The neutral readiness freezes with the center it describes.
     const centerEvidence = centerSamples.reduce((sum, sample) => sum + sample.confidence, 0);
     const freezeCenter = centerEvidence < MIN_CENTER_EVIDENCE;
+    this.centerFrozen = freezeCenter;
     if (freezeCenter && !this.published) return undefined;
     const neutralMode = freezeCenter ? undefined : scalarMode(centerSamples, CENTER_BIN, CENTER_CLUSTER_RADIUS);
     if (!freezeCenter && !neutralMode) return undefined;
@@ -441,5 +482,7 @@ export class AdaptiveCalibrator {
     this.scaleDisagreementSince = undefined;
     this.poseDisagreementSince = undefined;
     this.centerStarvedSince = undefined;
+    this.centerFrozen = false;
+    this.currentPhase = 'collecting';
   }
 }
