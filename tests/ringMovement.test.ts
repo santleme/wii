@@ -14,7 +14,6 @@ import {
   RING_LIMIT,
   type RingPosition,
   stepOpponentMotion,
-  stepOpponentPosition,
 } from '../src/games/boxing/ringMovement';
 
 const repeat = (times: number, position: RingPosition, step: (p: RingPosition) => RingPosition) => {
@@ -66,35 +65,6 @@ describe('ring movement', () => {
     expect(inPunchRange({ x: 0, z: 0 }, { x: 0, z: PUNCH_RANGE + 0.01 })).toBe(false);
   });
 
-  it('walks the opponent back into range', () => {
-    const player = { x: 0, z: 2.5 };
-    let opponent: RingPosition = { x: 0, z: -2.5 };
-    for (let i = 0; i < 300; i += 1) opponent = stepOpponentPosition(opponent, player, 'guard', 1, 1 / 60).position;
-    expect(fighterDistance(opponent, player)).toBeCloseTo(2.75);
-  });
-
-  it('circles while guarding or recovering and plants its feet to wind up', () => {
-    for (const phase of ['guard', 'recover'] as const) {
-      const { position } = stepOpponentPosition(OPPONENT_START, PLAYER_START, phase, 1, 0.5);
-      expect(position.x).not.toBeCloseTo(0);
-      expect(fighterDistance(position, PLAYER_START)).toBeCloseTo(2.7);
-    }
-    for (const player of [PLAYER_START, { x: 0, z: 2.5 }]) {
-      expect(stepOpponentPosition(OPPONENT_START, player, 'windup', 1, 0.5).position).toEqual(OPPONENT_START);
-    }
-  });
-
-  it('turns around at the ropes instead of leaving the ring', () => {
-    let move = { position: OPPONENT_START, direction: 1 as -1 | 1 };
-    const directions = new Set<number>();
-    for (let i = 0; i < 3000; i += 1) {
-      move = stepOpponentPosition(move.position, PLAYER_START, 'guard', move.direction, 1 / 60);
-      directions.add(move.direction);
-      expect(Math.abs(move.position.x)).toBeLessThanOrEqual(RING_LIMIT);
-      expect(Math.abs(move.position.z)).toBeLessThanOrEqual(RING_LIMIT);
-    }
-    expect(directions).toEqual(new Set([-1, 1]));
-  });
 });
 
 describe('opponent motion', () => {
@@ -221,24 +191,4 @@ describe('opponent motion', () => {
     const motion = stepOpponentMotion(createOpponentMotion(), OPPONENT_START, guard, DT, low);
     expect(gap(motion, OPPONENT_START)).toBeGreaterThanOrEqual(MIN_FIGHTER_DISTANCE - 1e-6);
   });
-});
-
-describe('punch evasion', () => {
-  it('requires actual lateral displacement across the line of the punch', async () => {
-    const { evadedByFootwork } = await import('../src/games/boxing/ringMovement');
-    const player = { x: 0, z: 2 };
-    const target = { x: 0, z: -0.5 };
-    expect(evadedByFootwork(player, target, { x: 0, z: -0.7 })).toBe(false);
-    expect(evadedByFootwork(player, target, { x: 0.05, z: -0.5 })).toBe(false);
-    expect(evadedByFootwork(player, target, { x: 0.3, z: -0.5 })).toBe(true);
-  });
-});
-
-it('chooses the same initial footwork direction from the same delayed observation', () => {
-  const initial = createOpponentMotion({ x: 0, z: 0 });
-  const context = { phase: 'guard' as const, skill: 0.5, playerPunching: false, observedPlayer: { x: 0, z: 2 } };
-  const left = stepOpponentMotion(initial, { x: -0.3, z: 2 }, context, 1 / 60, () => 0);
-  const right = stepOpponentMotion(initial, { x: 0.3, z: 2 }, context, 1 / 60, () => 0);
-  expect(left.velocity.x).toBeCloseTo(right.velocity.x, 3);
-  expect(left.velocity.z).toBeCloseTo(right.velocity.z, 3);
 });

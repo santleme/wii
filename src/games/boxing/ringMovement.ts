@@ -31,19 +31,6 @@ export const fighterDistance = (a: RingPosition, b: RingPosition): number => Mat
 export const inPunchRange = (a: RingPosition, b: RingPosition): boolean =>
   fighterDistance(a, b) <= PUNCH_RANGE + EPSILON;
 
-/**
- * A punch is aimed along the player-to-opponent line at onset. Only actual displacement
- * across that line can evade it; radial movement is handled by the range rule.
- */
-export function evadedByFootwork(playerAtOnset: RingPosition, targetAtOnset: RingPosition, targetAtPeak: RingPosition): boolean {
-  const dx = targetAtOnset.x - playerAtOnset.x;
-  const dz = targetAtOnset.z - playerAtOnset.z;
-  const distance = Math.hypot(dx, dz);
-  if (distance < EPSILON) return false;
-  const lateral = ((targetAtPeak.x - targetAtOnset.x) * dz - (targetAtPeak.z - targetAtOnset.z) * dx) / distance;
-  return Math.abs(lateral) >= 0.2;
-}
-
 /** Unit vector to the right of a fighter at `from` facing `to`. */
 export function rightOf(from: RingPosition, to: RingPosition): RingPosition {
   const distance = fighterDistance(from, to) || 1;
@@ -84,36 +71,6 @@ export function moveAround(self: RingPosition, other: RingPosition, forward: num
   );
 }
 
-export interface OpponentMove {
-  readonly position: RingPosition;
-  /** Circling direction to pass back in; it flips at the ropes. */
-  readonly direction: -1 | 1;
-}
-
-/**
- * While guarding or recovering the opponent closes in when out of range and otherwise circles
- * lightly. It plants its feet to wind up, so stepping back is a way out of the punch.
- */
-export function stepOpponentPosition(
-  opponent: RingPosition,
-  player: RingPosition,
-  phase: 'guard' | 'windup' | 'recover',
-  direction: -1 | 1,
-  dtS: number,
-): OpponentMove {
-  if (phase === 'windup') return { position: opponent, direction };
-  const excess = fighterDistance(opponent, player) - OPPONENT_APPROACH_DISTANCE;
-  if (excess > EPSILON) {
-    const forward = Math.min(excess, OPPONENT_APPROACH_SPEED * dtS);
-    return { position: moveAround(opponent, player, forward, 0), direction };
-  }
-  const strafe = direction * OPPONENT_CIRCLE_SPEED * dtS;
-  const position = moveAround(opponent, player, 0, strafe);
-  // Hitting a rope bends the arc, which shows up as a changed distance: turn around instead.
-  const blocked = Math.abs(fighterDistance(position, player) - fighterDistance(opponent, player)) > 1e-6;
-  return blocked ? { position: opponent, direction: direction === 1 ? -1 : 1 } : { position, direction };
-}
-
 export interface OpponentMotion {
   readonly position: RingPosition;
   /** m/s over the last step, for footwork animation. */
@@ -135,8 +92,6 @@ export interface OpponentMotionContext {
   readonly skill: number;
   /** A player punch animation is in flight. */
   readonly playerPunching: boolean;
-  /** Delayed perception controls intent; `player` remains the current collision position. */
-  readonly observedPlayer?: RingPosition;
 }
 
 /** Upper bound on how fast the commanded velocity changes, dash included (m/s²). */
@@ -208,7 +163,6 @@ export function stepOpponentMotion(
   }
 
   const distance = fighterDistance(position, player);
-  const observedDistance = fighterDistance(position, context.observedPlayer ?? player);
   const right = rightOf(position, player);
   // Unit vector toward the player; `right` turned back a quarter.
   const ahead = { x: right.z, z: -right.x };
@@ -218,25 +172,17 @@ export function stepOpponentMotion(
     strafe = direction * OPPONENT_DASH_SPEED * speedScale;
   } else if (!planted) {
     const recovering = phase === 'recover';
-    const excess = observedDistance - (recovering ? OPPONENT_RECOVER_DISTANCE : OPPONENT_APPROACH_DISTANCE);
+    const excess = distance - (recovering ? OPPONENT_RECOVER_DISTANCE : OPPONENT_APPROACH_DISTANCE);
     if (excess > EPSILON) {
       forward = brakingSpeed(OPPONENT_APPROACH_SPEED * speedScale, excess, dtS);
     } else {
       const keep = recovering ? OPPONENT_RECOVER_DISTANCE : OPPONENT_RETREAT_DISTANCE;
-      if (keep - observedDistance > EPSILON) forward = -brakingSpeed(OPPONENT_RETREAT_SPEED * speedScale, keep - observedDistance, dtS);
+      if (keep - distance > EPSILON) forward = -brakingSpeed(OPPONENT_RETREAT_SPEED * speedScale, keep - distance, dtS);
       strafe = direction * OPPONENT_CIRCLE_SPEED * speedScale;
     }
   }
 
-  // Determine intent in the delayed frame, then express it in the current physical
-  // frame for collision-safe integration. This avoids reacting to an unseen sidestep.
-  const perceivedRight = rightOf(position, context.observedPlayer ?? player);
-  const perceivedAhead = { x: perceivedRight.z, z: -perceivedRight.x };
-  const wantedX = forward * perceivedAhead.x + strafe * perceivedRight.x;
-  const wantedZ = forward * perceivedAhead.z + strafe * perceivedRight.z;
-  forward = wantedX * ahead.x + wantedZ * ahead.z;
-  strafe = wantedX * right.x + wantedZ * right.z;
-
+  // Steer the current velocity toward the wanted one, in the frame facing the player.
   const currentForward = velocity.x * ahead.x + velocity.z * ahead.z;
   const currentStrafe = velocity.x * right.x + velocity.z * right.z;
   const brisk = dashUntilS !== undefined || Math.hypot(velocity.x, velocity.z) > OPPONENT_BRISK_SPEED;
