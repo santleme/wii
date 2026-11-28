@@ -18,7 +18,7 @@ import { buildTennisStadium } from './stadium';
 import { LEARNING_TRAVEL, TennisTutorial } from './tutorial';
 import { advanceBall, createBall, solveOutgoing, solveOverNet, timeAtPlane, type BallState } from './ballistics';
 import { adjudicateContact, DEFAULT_GEOMETRY, strokeHeight, type ContactOutcome } from './contactAdjudicator';
-import { adaptOpponentSkill, canContactBall, chooseOpponentTarget, createOpponentAi, observePlayerPlacement, opponentRecoveryX, stepOpponentMotion, type OpponentAiState } from './opponentAi';
+import { adaptOpponentSkill, createOpponentAi, decideReturn, DEFAULT_OPPONENT_AI_CONFIG, type OpponentAiState } from './opponentAi';
 import { ballAtPlannedContact, resolveScheduledOpponentReturn, type OpponentHitPlan } from './opponentReturn';
 import { crossesNetBelowCord } from './rallyPhysics';
 import { BASELINE_Z, COURT_HALF_WIDTH, groundImpact, legalLanding, NET_HEIGHT, serviceSide } from './court';
@@ -40,16 +40,13 @@ const PLAYER_MOVE_SPEED = 5.5;
 const RACKET_REACH_X = 0.6;
 const TAPE_WINDOW_MS = 1200;
 const POINT_PAUSE_S = 1.2;
+const SURE_RETURNS = 3;
 const SWING_ANIM_START = 0.2;
 /** A proper stroke gets until this long after the ideal instant; then movement alone will do. */
 const HELP_AFTER_S = 0.18;
 const HELP_BEFORE_S = 0.5;
-const OPPONENT_REACH_X = 1.15;
-const OPPONENT_REACH_Z = 1.4;
-const OPPONENT_MIN_CONTACT_Y = 0.12;
-const OPPONENT_MAX_CONTACT_Y = 2.5;
-const OPPONENT_REACTION_MS = 200;
-const SURE_RETURNS = 3;
+/** An opponent to rally with: it misses now and then, more under pressure. */
+const RALLY_AI = { ...DEFAULT_OPPONENT_AI_CONFIG, generosity: 0.45, qualityPressure: 0.2 };
 const TOSS_VY = 6.4;
 const SERVE_CONTACT_X_OFFSET = 0.35;
 /** The ball is held out at arm's length, clear of the body, as seen from behind. */
@@ -83,25 +80,6 @@ interface TapeEntry {
   ball: BallState;
   playerX?: number;
   playerSpeed?: number;
-  opponentX?: number;
-  opponentVelocity?: number;
-  rngState?: number;
-  snapshot?: RallySnapshot;
-}
-
-interface RallySnapshot {
-  readonly phase: Phase;
-  readonly score: TennisScoreState;
-  readonly faults: number;
-  readonly servingFlight: boolean;
-  readonly opponentAi: OpponentAiState;
-  readonly opponentReturns: number;
-  readonly opponentBeaten: boolean;
-  readonly opponentHitPlan: OpponentHitPlan | null;
-  readonly pendingPoint?: { deadAt: number; winner: PlayerSide; label: string };
-  readonly readySide: -1 | 0 | 1;
-  readonly playerLateralSpeed: number;
-  readonly opponentServed: boolean;
 }
 
 interface DeferredAssist {
@@ -153,16 +131,8 @@ export class TennisGame {
   /** The serving rule: this hand threw the ball, so the other one strikes it. Unset on an automatic toss. */
   private tossedWith?: Hand;
   private swingLift: -1 | 0 | 1 = 0;
-  private opponentBeaten = false;
   private opponentReturns = 0;
-  private opponentVelocity = 0;
-  private opponentStepStartX = 0;
-  private opponentStepMs = 0;
-  private randomState = 0;
-  /** Already applied strokes form a commit boundary for older input events. */
-  private lastPlayerHitMs = Number.NEGATIVE_INFINITY;
-  /** Audio already emitted on a speculative flight is never replayed twice. */
-  private readonly playedEvents = new Set<string>();
+  private opponentBeaten = false;
   private opponentServed = false;
   private readySide: -1 | 0 | 1 = 0;
   private tossAtMs = 0;
@@ -209,11 +179,8 @@ export class TennisGame {
       initialRacketHand?: Hand;
       onRacketHand?: (hand: Hand) => void;
       onStrokeTravel?: (travel: number) => void;
-      /** Stable seed makes gameplay decisions reproducible; visual randomness is separate. */
-      randomSeed?: number;
     } = {},
   ) {
-    this.randomState = (options.randomSeed ?? Math.floor(Math.random() * 0x100000000)) >>> 0;
     this.racketHand = options.initialRacketHand ?? 'right';
     this.crowd = buildTennisStadium(this.scene).crowd;
     this.effects = createTennisEffects(this.scene);
@@ -467,7 +434,6 @@ export class TennisGame {
     }
     if (this.phase.kind !== 'rally' || !this.ball) return;
 
-    if (simulationSwing.peakTimestampMs <= this.lastPlayerHitMs) return;
     const ballAtPeak = this.rewind(simulationSwing.peakTimestampMs);
     if (!ballAtPeak || (this.servingFlight && ballAtPeak.bounces === 0)) return;
 
@@ -505,9 +471,7 @@ export class TennisGame {
       this.setFeedback('BATA COM A RAQUETE', 'neutral');
       return;
     }
-    const hitMs = Math.min(now, Math.max(this.tossAtMs, swing.peakTimestampMs));
-    const hitX = this.avatarAt(hitMs)?.playerX ?? this.playerX;
-    const contact = createBall({ x: hitX + SERVE_CONTACT_X_OFFSET, y: SERVE_CONTACT_HEIGHT, z: BASELINE_Z + 0.35 }, { x: 0, y: -1, z: 0 }, 'player');
+    const contact = createBall({ x: this.playerX + SERVE_CONTACT_X_OFFSET, y: SERVE_CONTACT_HEIGHT, z: BASELINE_Z + 0.35 }, { x: 0, y: -1, z: 0 }, 'player');
     const outcome = adjudicateContact({
       ballAtPeak: contact,
       playerX: contact.position.x,
@@ -516,7 +480,7 @@ export class TennisGame {
       timingErrorOverrideMs: Math.max(-SERVE_TIMING_SPREAD_MS, Math.min(SERVE_TIMING_SPREAD_MS, swing.peakTimestampMs - this.phase.idealHitMs)),
       geometry: { playerZ: BASELINE_Z + 1 },
     });
-    this.applyPlayerOutcome(outcome, contact, hitMs, now, true, wallNow, swing.peakTimestampMs);
+    this.applyPlayerOutcome(outcome, contact, now, now, true, wallNow, swing.peakTimestampMs);
   }
 
   private applyPlayerOutcome(
@@ -544,30 +508,6 @@ export class TennisGame {
     // Rewind + fast-forward: the new flight starts at the physical peak instant,
     // then advances to now — detection latency never enters the physics.
     const lagSec = Math.max(0, (now - peakMs) / 1000);
-    // This flight is re-simulated from the swing's physical instant. The opponent's
-    // movement must be restored with the ball, rather than starting from its present position.
-    const avatarAtPeak = this.avatarAt(peakMs);
-    if (avatarAtPeak) {
-      this.playerX = avatarAtPeak.playerX;
-      this.opponentX = avatarAtPeak.opponentX;
-      this.opponentVelocity = avatarAtPeak.opponentVelocity;
-      this.randomState = avatarAtPeak.rngState;
-      const snapshot = avatarAtPeak.snapshot;
-      if (snapshot) {
-        this.phase = snapshot.phase;
-        this.score = snapshot.score;
-        this.faults = snapshot.faults;
-        this.servingFlight = snapshot.servingFlight;
-        this.opponentAi = snapshot.opponentAi;
-        this.opponentReturns = snapshot.opponentReturns;
-        this.opponentBeaten = snapshot.opponentBeaten;
-        this.opponentHitPlan = snapshot.opponentHitPlan;
-        this.pendingPoint = snapshot.pendingPoint;
-        this.readySide = snapshot.readySide;
-        this.playerLateralSpeed = snapshot.playerLateralSpeed;
-        this.opponentServed = snapshot.opponentServed;
-      }
-    }
     // Struck at the top of the toss: the console game's fast serve, with its white streak.
     this.fastServe = isServe && this.phase.kind === 'player-serve' && Math.abs(struckAtMs - this.phase.idealHitMs) <= FAST_SERVE_MS;
     const outgoing = isServe
@@ -577,23 +517,20 @@ export class TennisGame {
       }, this.fastServe ? 0.62 : 0.95)
       : outcome.outgoing;
     this.pendingPoint = undefined;
-    this.lastPlayerHitMs = peakMs;
     this.servingFlight = isServe;
     this.ball = createBall(ballAtPeak.position, outgoing, 'player');
-    this.phase = { kind: 'rally' };
-    this.opponentHitPlan = null;
     this.replaceFlightTape([{ tMs: peakMs, ball: this.ball }]);
     this.lastSimulationTimeMs = Math.max(this.lastSimulationTimeMs, now);
     this.lastWallTimeMs = wallNow;
     this.wallToSimulationOffsetMs = now - wallNow;
-    this.playOnce('player-racket', peakMs, () => this.audio?.racket(0.4 + 0.6 * outcome.quality01));
+    this.phase = { kind: 'rally' };
+    this.opponentHitPlan = null;
+    this.audio?.racket(0.4 + 0.6 * outcome.quality01);
     this.effects.impact(ballAtPeak.position, outcome.quality01);
     for (let elapsed = 0; elapsed < lagSec && this.phase.kind === 'rally';) {
       const dt = Math.min(1 / 60, lagSec - elapsed);
       elapsed += dt;
-      const replayNow = peakMs + elapsed * 1000;
-      this.stepAvatars(dt, replayNow);
-      this.stepBall(dt, replayNow);
+      this.stepBall(dt, peakMs + elapsed * 1000);
     }
     if (this.phase.kind !== 'rally') return;
 
@@ -606,17 +543,8 @@ export class TennisGame {
     this.status = isServe ? 'Saque diagonal' : `${dirLabel}${heightLabel}${spinLabel}`;
   }
 
-  private replaceFlightTape(entries: TapeEntry[], keepBeforeMs?: number): void {
-    const retained = keepBeforeMs === undefined ? [] : this.tape.filter((entry) => entry.tMs < keepBeforeMs && entry.tMs >= keepBeforeMs - TAPE_WINDOW_MS);
-    this.tape = [...retained, ...entries.map((entry) => ({
-      playerX: this.playerX,
-      playerSpeed: this.playerLateralSpeed,
-      opponentX: this.opponentX,
-      opponentVelocity: this.opponentVelocity,
-      rngState: this.randomState,
-      snapshot: this.captureRallySnapshot(),
-      ...entry,
-    }))];
+  private replaceFlightTape(entries: TapeEntry[]): void {
+    this.tape = entries;
     this.deferredAssist = undefined;
   }
 
@@ -632,54 +560,6 @@ export class TennisGame {
       if (entry.tMs <= tMs) return entry;
     }
     return undefined;
-  }
-
-  private captureRallySnapshot(): RallySnapshot {
-    return {
-      phase: this.phase,
-      score: this.score,
-      faults: this.faults,
-      servingFlight: this.servingFlight,
-      opponentAi: this.opponentAi,
-      opponentReturns: this.opponentReturns,
-      opponentBeaten: this.opponentBeaten,
-      opponentHitPlan: this.opponentHitPlan,
-      pendingPoint: this.pendingPoint,
-      readySide: this.readySide,
-      playerLateralSpeed: this.playerLateralSpeed,
-      opponentServed: this.opponentServed,
-    };
-  }
-
-  /** Restore positions from the flight tape; interpolate rather than borrowing a later tick. */
-  private avatarAt(tMs: number): { playerX: number; opponentX: number; opponentVelocity: number; rngState: number; snapshot?: RallySnapshot } | undefined {
-    let index = this.tape.length - 1;
-    while (index >= 0 && this.tape[index]!.tMs > tMs) index -= 1;
-    if (index < 0) return undefined;
-    const before = this.tape[index]!;
-    const after = this.tape[index + 1];
-    const fraction = after && after.tMs > before.tMs ? Math.min(1, (tMs - before.tMs) / (after.tMs - before.tMs)) : 0;
-    const mix = (a: number, b: number) => a + (b - a) * fraction;
-    return {
-      playerX: mix(before.playerX ?? this.playerX, after?.playerX ?? before.playerX ?? this.playerX),
-      opponentX: mix(before.opponentX ?? this.opponentX, after?.opponentX ?? before.opponentX ?? this.opponentX),
-      opponentVelocity: mix(before.opponentVelocity ?? 0, after?.opponentVelocity ?? before.opponentVelocity ?? 0),
-      rngState: before.rngState ?? this.randomState,
-      snapshot: before.snapshot,
-    };
-  }
-
-  private playOnce(kind: string, atMs: number, play: () => void): void {
-    const id = `${kind}:${Math.round(atMs * 10)}`;
-    if (this.playedEvents.has(id)) return;
-    this.playedEvents.add(id);
-    play();
-  }
-
-  private random(): number {
-    // A compact stateful generator; its state is captured by flight snapshots.
-    this.randomState = (Math.imul(this.randomState, 1664525) + 1013904223) >>> 0;
-    return this.randomState / 0x100000000;
   }
 
   private simulationTimestampAt(wallTimestampMs: number, observedWallTimestampMs: number): number {
@@ -709,7 +589,7 @@ export class TennisGame {
     const dt = elapsedSimulationSeconds(this.lastSimulationTimeMs, now, fixedDt);
     this.lastSimulationTimeMs = now;
     this.stepPhase(dt, now, wallNow);
-    this.stepAvatars(dt, now);
+    this.stepAvatars(dt);
     this.helpWithMotion(now);
     this.stepBall(dt, now);
     this.stepAnimations(dt);
@@ -755,14 +635,14 @@ export class TennisGame {
           // The serve is not a return: always in, modest pace, slight lateral variety.
           const from = { x: this.serveX, y: SERVE_CONTACT_HEIGHT, z: -BASELINE_Z - 0.35 };
           // Diagonal: into the box across from where the server stands.
-          const targetX = -Math.sign(this.serveX) * (1.2 + this.random() * 1.3);
-          const velocity = solveOutgoing(from, { x: targetX, z: 3.5 + this.random() }, 1.25);
+          const targetX = -Math.sign(this.serveX) * (1.2 + Math.random() * 1.3);
+          const velocity = solveOutgoing(from, { x: targetX, z: 3.5 + Math.random() }, 1.25);
           this.ball = createBall(from, velocity, 'opponent');
+          this.replaceFlightTape([{ tMs: now, ball: this.ball }]);
           this.opponentSwingT = 0;
           this.opponentServed = true;
           this.servingFlight = true;
           this.phase = { kind: 'rally' };
-          this.replaceFlightTape([{ tMs: now, ball: this.ball }]);
           this.audio?.racket(0.5);
           this.status = 'Saque do adversário — prepare-se';
         }
@@ -774,21 +654,28 @@ export class TennisGame {
 
   private startPoint(now: number): void {
     this.servingFlight = false;
-    this.playedEvents.clear();
-    this.lastPlayerHitMs = Number.NEGATIVE_INFINITY;
+    // Serve-flight state belongs to one point only: nothing the last point's serve did —
+    // a fast serve, the opponent's strike, a saved arm motion or a deferred assist — may
+    // leak into this one. `faults` is the exception: it survives on purpose, because a
+    // first fault is followed by the second serve of the same point (serveFault relies
+    // on it, and endPoint is what resets it).
+    this.opponentServed = false;
+    this.fastServe = false;
+    this.serveStroke = false;
+    this.armMotion = undefined;
+    this.deferredAssist = undefined;
     this.playerX = this.score.server === 'player' ? this.serveX : 0;
     this.opponentX = this.score.server === 'opponent' ? this.serveX : 0;
-    this.opponentVelocity = 0;
-    this.opponentReturns = 0;
     this.opponentHitPlan = null;
+    this.opponentReturns = 0;
     this.opponentBeaten = false;
     if (this.score.server === 'player') {
       this.tossBall(now);
       this.status = 'Seu saque: lance com a mão livre e bata com a raquete';
     } else {
       this.ball = createBall({ x: this.serveX, y: SERVE_HOLD_HEIGHT, z: -BASELINE_Z - 0.35 }, { x: 0, y: 0, z: 0 }, 'opponent');
-      this.phase = { kind: 'opponent-serve', hitAtMs: now + OPPONENT_TOSS_MS };
       this.replaceFlightTape([{ tMs: now, ball: this.ball }]);
+      this.phase = { kind: 'opponent-serve', hitAtMs: now + OPPONENT_TOSS_MS };
       this.status = 'Saque do adversário…';
     }
   }
@@ -799,8 +686,8 @@ export class TennisGame {
     // Held until a hand is lifted (setTossHand); thrown anyway after a while, so nobody gets stuck.
     this.ball = createBall({ ...from, y: SERVE_HOLD_HEIGHT }, { x: 0, y: 0, z: 0 }, 'player');
     this.tossAtMs = now + SERVE_HOLD_MS;
-    this.phase = { kind: 'player-serve', idealHitMs: this.tossAtMs + SERVE_IDEAL_MS };
     this.replaceFlightTape([{ tMs: now, ball: this.ball }]);
+    this.phase = { kind: 'player-serve', idealHitMs: this.tossAtMs + SERVE_IDEAL_MS };
     this.tossArmed = false;
   }
 
@@ -822,7 +709,7 @@ export class TennisGame {
     const before = this.ball;
     const after = advanceBall(before, dt);
     this.ball = after;
-    this.tape.push({ tMs: now, ball: after, playerX: this.playerX, playerSpeed: this.playerLateralSpeed, opponentX: this.opponentX, opponentVelocity: this.opponentVelocity, rngState: this.randomState, snapshot: this.captureRallySnapshot() });
+    this.tape.push({ tMs: now, ball: after, playerX: this.playerX, playerSpeed: this.playerLateralSpeed });
     while (this.tape.length > 0 && this.tape[0]!.tMs < now - TAPE_WINDOW_MS) this.tape.shift();
 
     if (this.phase.kind !== 'rally') return;
@@ -830,11 +717,7 @@ export class TennisGame {
     const receiver: PlayerSide = before.lastHitter === 'player' ? 'opponent' : 'player';
     if (crossesNetBelowCord(before, after, dt, NET_HEIGHT)) {
       if (this.servingFlight && before.bounces === 0) this.serveFault(receiver, now);
-      else {
-        const crossing = timeAtPlane(before, 0, undefined, dt);
-        const deadAt = now - dt * 1000 + Math.min(dt, crossing?.timeSeconds ?? dt) * 1000;
-        this.finishFlight(receiver, 'NA REDE!', now, deadAt);
-      }
+      else this.endPoint(receiver, 'NA REDE!', now);
       return;
     }
     if (after.bounces > before.bounces) {
@@ -842,30 +725,22 @@ export class TennisGame {
       if (before.bounces === 0) {
         if (!legalLanding(impact.x, impact.z, before.lastHitter, this.servingFlight ? serviceSide(this.score.points) : undefined)) {
           if (this.servingFlight && before.bounces === 0) this.serveFault(receiver, now);
-          else this.finishFlight(receiver, 'FORA!', now, now - dt * 1000 + impact.seconds * 1000);
+          else this.endPoint(receiver, 'FORA!', now);
           return;
         }
         this.bounceRing.position.set(impact.x, 0.027, impact.z);
         this.bounceAge = 0;
-        const bounceAtMs = now - dt * 1000 + impact.seconds * 1000;
-        this.playOnce('bounce', bounceAtMs, () => this.audio?.bounce(0.35));
+        this.audio?.bounce(0.35);
       }
       if (after.bounces >= 2) {
-        const impactAtMs = now - dt * 1000 + impact.seconds * 1000;
-        // A scheduled contact earlier in this same step beats the second bounce.
-        // Resolve at the crossing first; otherwise we would score a ball already hit.
-        if (this.opponentHitPlan && this.opponentHitPlan.hitAtMs < impactAtMs) {
-          this.stepOpponentPlan(now);
-          if (this.ball !== after) return;
-        }
-        this.finishFlight(after.lastHitter, 'SEGUNDO QUIQUE', now, impactAtMs);
+        this.finishFlight(after.lastHitter, 'SEGUNDO QUIQUE', now, now - dt * 1000 + impact.seconds * 1000);
         return;
       }
     }
     if (Math.abs(after.position.z) > 15 || Math.abs(after.position.x) > 8 || (after.velocity.x === 0 && after.velocity.y === 0 && after.velocity.z === 0)) {
       if (this.servingFlight && before.bounces === 0) this.serveFault(receiver, now);
       else if (after.bounces > 0) this.finishFlight(after.lastHitter, 'SEM DEVOLUÇÃO', now);
-      else this.finishFlight(receiver, 'FORA!', now);
+      else this.endPoint(receiver, 'FORA!', now);
       return;
     }
 
@@ -874,7 +749,7 @@ export class TennisGame {
 
   private stepOpponentPlan(now: number): void {
     if (!this.ball) return;
-    if (this.ball.lastHitter !== 'player' || this.ball.velocity.z >= 0) {
+    if ((this.servingFlight && this.ball.bounces === 0) || this.ball.lastHitter !== 'player' || this.ball.velocity.z >= 0) {
       this.opponentHitPlan = null;
       return;
     }
@@ -892,45 +767,31 @@ export class TennisGame {
     if (now >= this.opponentHitPlan.hitAtMs) {
       const plan = this.opponentHitPlan;
       const contactBall = ballAtPlannedContact(plan);
-      // Evaluate at the actual crossing inside this step, before the remaining movement.
-      const fraction = this.opponentStepMs > 0
-        ? Math.max(0, Math.min(1, (plan.hitAtMs - (now - this.opponentStepMs)) / this.opponentStepMs))
-        : 1;
-      const contactX = this.opponentStepStartX + (this.opponentX - this.opponentStepStartX) * fraction;
-      const reachable = canContactBall({
-        x: contactX, z: OPPONENT_HOME_Z, lateralReach: OPPONENT_REACH_X, forwardReach: OPPONENT_REACH_Z,
-        minimumHeight: OPPONENT_MIN_CONTACT_Y, maximumHeight: OPPONENT_MAX_CONTACT_Y,
-      }, contactBall.position);
-      const legalServe = !this.servingFlight || contactBall.bounces > 0;
-      const observedForMs = plan.contactAfterSeconds * 1000;
-      if (observedForMs >= OPPONENT_REACTION_MS) this.opponentAi = observePlayerPlacement(this.opponentAi, contactBall.position.x);
+      // The first returns of a point are certain, so there is always a rally; after that it can be beaten.
+      let roll = this.opponentReturns < SURE_RETURNS ? 0 : undefined;
+      const decision = decideReturn(this.opponentAi, this.pressureOnOpponent(contactBall), () => {
+        const value = roll ?? Math.random();
+        roll = undefined;
+        return value;
+      }, RALLY_AI);
       this.opponentHitPlan = null;
-      if (!reachable || !legalServe || observedForMs < OPPONENT_REACTION_MS) {
+      if (decision.kind === 'no-return') {
+        // Ball plays on and the bounce rules score the point; the opponent visibly fails to get there.
         this.opponentBeaten = true;
         return;
       }
       this.opponentReturns += 1;
-      // The first three reachable contacts stay assisted; all shots use the observed court.
-      const pressure = this.opponentReturns <= SURE_RETURNS ? 0 : this.pressureOnOpponent(contactBall);
-      const observedPlayer = this.tapeAt(plan.hitAtMs - OPPONENT_REACTION_MS)?.playerX ?? 0;
-      const target = chooseOpponentTarget(observedPlayer, contactX, pressure, this.opponentAi.skill, () => this.random());
       this.ball = resolveScheduledOpponentReturn(
         plan,
         now,
-        { x: target.x, z: target.z },
-        target.flightSeconds,
+        { x: decision.targetX, z: decision.targetZ },
+        decision.flightTimeSeconds,
       );
+      this.replaceFlightTape([{ tMs: now, ball: this.ball }]);
       this.servingFlight = false;
-      const returnedAtContact = resolveScheduledOpponentReturn(
-        plan, plan.hitAtMs, { x: target.x, z: target.z }, target.flightSeconds,
-      );
-      this.replaceFlightTape([
-        { tMs: plan.hitAtMs, ball: returnedAtContact },
-        { tMs: now, ball: this.ball },
-      ], plan.hitAtMs);
       this.opponentSwingT = 0;
       this.opponentServed = false;
-      this.playOnce('opponent-racket', plan.hitAtMs, () => this.audio?.racket(0.4));
+      this.audio?.racket(0.4);
       this.effects.impact(this.ball.position, 0.1);
     }
   }
@@ -954,9 +815,8 @@ export class TennisGame {
   }
 
   private finishFlight(winner: PlayerSide, label: string, now: number, deadAt = now): void {
-    this.pendingPoint = { winner, label, deadAt };
-    // Only advance the score after the player's late-input window closes.
-    if (now >= deadAt + 650) this.endPoint(winner, label, now);
+    if (winner === 'opponent') this.pendingPoint = { winner, label, deadAt };
+    else this.endPoint(winner, label, now);
   }
 
   private endPoint(winner: PlayerSide, headline: string, now = nowMs()): void {
@@ -964,8 +824,8 @@ export class TennisGame {
     this.faults = 0;
     const result = awardPoint(this.score, winner);
     this.score = result.state;
-    this.opponentHitPlan = null;
     this.opponentAi = adaptOpponentSkill(this.opponentAi, winner);
+    this.opponentHitPlan = null;
 
     const youWon = winner === 'player';
     this.setFeedback(headline, youWon ? 'good' : 'bad');
@@ -1001,7 +861,7 @@ export class TennisGame {
     }
   }
 
-  private stepAvatars(dt: number, now = this.lastSimulationTimeMs): void {
+  private stepAvatars(dt: number): void {
     // Auto-movement like the Miis: glide toward the incoming ball's lateral position.
     let targetX = this.phase.kind === 'player-serve' ? this.serveX : 0;
     if (this.ball && this.ball.velocity.z > 0.5 && this.ball.position.z < PLAYER_HOME_Z + 2) {
@@ -1017,21 +877,16 @@ export class TennisGame {
     this.playerX += step;
     this.playerLateralSpeed = Math.abs(this.playerX - before) / Math.max(dt, 1e-6);
 
-    let oppTarget = this.phase.kind === 'opponent-serve' ? this.serveX : opponentRecoveryX(this.opponentAi);
-    if (this.ball && this.ball.velocity.z < -0.5 && this.opponentHitPlan
-      && now >= this.opponentHitPlan.hitAtMs - this.opponentHitPlan.contactAfterSeconds * 1000 + OPPONENT_REACTION_MS) {
+    let oppTarget = this.phase.kind === 'opponent-serve' ? this.serveX : 0;
+    if (this.ball && this.ball.velocity.z < -0.5) {
       oppTarget = Math.max(-2.5, Math.min(2.5, this.opponentHitPlan ? ballAtPlannedContact(this.opponentHitPlan).position.x : this.ball.position.x));
     }
-    if (this.opponentBeaten) oppTarget = this.opponentX;
-    this.opponentStepStartX = this.opponentX;
-    this.opponentStepMs = dt * 1000;
-    const motion = stepOpponentMotion(
-      { x: this.opponentX, velocity: this.opponentVelocity }, oppTarget, dt,
-      2.5 + this.opponentAi.skill * 3.5, 14, 2.5,
-    );
-    const oppStep = motion.x - this.opponentX;
-    this.opponentX = motion.x;
-    this.opponentVelocity = motion.velocity;
+    // Beaten: left stranded on the wrong side, short of the ball.
+    if (this.opponentBeaten && this.ball) oppTarget = this.ball.position.x > 0 ? -2.5 : 2.5;
+    const oppDelta = oppTarget - this.opponentX;
+    const oppSpeed = 2.5 + this.opponentAi.skill * 3.5;
+    const oppStep = Math.sign(oppDelta) * Math.min(Math.abs(oppDelta), oppSpeed * dt);
+    this.opponentX += oppStep;
     this.playerMotion = step / Math.max(dt, 1e-6);
     this.opponentMotion = oppStep / Math.max(dt, 1e-6);
     this.playerStride += Math.abs(step);

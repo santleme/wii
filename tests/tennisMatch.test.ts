@@ -13,6 +13,15 @@ function match() {
     score: TennisScoreState;
     faults: number;
     servingFlight: boolean;
+    opponentServed: boolean;
+    fastServe: boolean;
+    serveStroke: boolean;
+    armMotion?: { hand: 'left' | 'right'; sideways: number; atMs: number };
+    deferredAssist?: {
+      flightTape: readonly { tMs: number; ball: BallState }[];
+      swing: { side: 'forehand' | 'backhand'; power01: number; verticalSpeed: number; contactY: number; peakTimestampMs: number };
+      swingDirection: 1 | -1;
+    };
     phase: { kind: string };
     tape: { tMs: number; ball: BallState }[];
     pendingPoint?: { deadAt: number };
@@ -42,6 +51,33 @@ it('keeps the serve side on first fault and scores the second fault exactly once
     state.stepBall(1 / 60, 1500);
     expect(state.score.points.opponent).toBe(1);
     expect(state.faults).toBe(0);
+  } finally {
+    game.dispose();
+  }
+});
+
+it('starts each point with the serve-flight flags cleared, and keeps the fault count', () => {
+  const { game, state } = match();
+  try {
+    state.startPoint(1000);
+    // What a point that ended mid-serve-flight leaves behind.
+    state.opponentServed = true;
+    state.fastServe = true;
+    state.serveStroke = true;
+    state.armMotion = { hand: 'right', sideways: 0.5, atMs: 900 };
+    state.deferredAssist = {
+      flightTape: state.tape,
+      swing: { side: 'forehand', power01: 0.35, verticalSpeed: 0, contactY: 0, peakTimestampMs: 900 },
+      swingDirection: 1,
+    };
+    state.faults = 1; // a first fault already happened: the second serve belongs to the same point
+    state.startPoint(2000);
+    expect(state.opponentServed).toBe(false);
+    expect(state.fastServe).toBe(false);
+    expect(state.serveStroke).toBe(false);
+    expect(state.armMotion).toBeUndefined();
+    expect(state.deferredAssist).toBeUndefined();
+    expect(state.faults).toBe(1);
   } finally {
     game.dispose();
   }
@@ -390,67 +426,4 @@ it('returns an arriving ball on plain arm movement when no stroke was read, and 
       game.dispose();
     }
   }
-});
-
-it('keeps an out point reversible until the late-swing window closes and commits once', () => {
-  const { game, state } = match();
-  const clock = vi.spyOn(performance, 'now').mockReturnValue(1200);
-  const scoring = state as unknown as {
-    finishFlight(winner: 'player' | 'opponent', label: string, now: number, deadAt?: number): void;
-  };
-  try {
-    const incoming = { ...createBall({ x: 0, y: 0.8, z: 7.2 }, { x: 0, y: 0, z: 5 }, 'opponent'), bounces: 1 };
-    state.phase = { kind: 'rally' };
-    state.ball = incoming;
-    state.tape = [{ tMs: 1000, ball: incoming }];
-    scoring.finishFlight('player', 'FORA!', 1200, 1200);
-    expect(state.score.points.player).toBe(0);
-    expect(state.pendingPoint).toBeDefined();
-    state.stepBall(0, 1849);
-    expect(state.score.points.player).toBe(0);
-    state.stepBall(0, 1850);
-    expect(state.score.points.player).toBe(1);
-    state.stepBall(0, 1900);
-    expect(state.score.points.player).toBe(1);
-    state.resolveSwing({ side: 'forehand', power01: 0.5, verticalSpeed: 0, contactY: 0, peakTimestampMs: 1000 });
-    expect(state.score.points.player).toBe(1);
-  } finally {
-    clock.mockRestore();
-    game.dispose();
-  }
-});
-
-it('accepts a valid pre-out swing before the point is committed', () => {
-  const { game, state } = match();
-  const clock = vi.spyOn(performance, 'now').mockReturnValue(1200);
-  const scoring = state as unknown as {
-    finishFlight(winner: 'player' | 'opponent', label: string, now: number, deadAt?: number): void;
-  };
-  try {
-    const incoming = { ...createBall({ x: 0, y: 0.8, z: 7.2 }, { x: 0, y: 0, z: 5 }, 'opponent'), bounces: 1 };
-    state.phase = { kind: 'rally' };
-    state.ball = incoming;
-    state.tape = [{ tMs: 1000, ball: incoming }];
-    scoring.finishFlight('player', 'FORA!', 1100, 1100);
-    state.resolveSwing({ side: 'forehand', power01: 0.5, verticalSpeed: 0, contactY: 0, peakTimestampMs: 1000 });
-    expect(state.pendingPoint).toBeUndefined();
-    expect(state.ball.lastHitter).toBe('player');
-    expect(state.score.points.player).toBe(0);
-  } finally {
-    clock.mockRestore();
-    game.dispose();
-  }
-});
-
-it('uses the net impact instant as the cutoff, rather than the end of its tick', () => {
-  const { game, state } = match();
-  try {
-    state.phase = { kind: 'rally' };
-    state.ball = createBall({ x: 0, y: 0.4, z: -0.01 }, { x: 0, y: 0, z: 1 }, 'opponent');
-    state.stepBall(0.02, 1020);
-    expect(state.pendingPoint?.deadAt).toBeCloseTo(1010, 3);
-    expect(state.score.points.player).toBe(0);
-    state.stepBall(0, 1660);
-    expect(state.score.points.player).toBe(1);
-  } finally { game.dispose(); }
 });
